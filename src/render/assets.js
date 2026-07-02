@@ -21,6 +21,7 @@ const MODELS = {
   trees: 'assets/models/city/grass-trees.glb',
   treesTall: 'assets/models/city/grass-trees-tall.glb',
   pavement: 'assets/models/city/pavement.glb',
+  lamppost: 'assets/models/city/road-straight-lightposts.glb',
   coin: 'assets/models/platformer/coin.glb',         // data node core
   flag: 'assets/models/platformer/flag.glb',
 };

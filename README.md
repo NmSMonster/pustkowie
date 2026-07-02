@@ -52,11 +52,15 @@ call the regulators on whoever's winning.
 - `src/input.js` / `src/audio.js` — trackpad-first controls; WebAudio SFX driven by sim events
 - `src/settings.js` — persistent settings (volumes, graphics quality, last faction) in localStorage
 
-Rendering: bloom + color-grade post pipeline (MSAA render target), shader
-sky dome at golden hour, sculpted backdrop hills outside the flat playfield,
-instanced grass, PMREM image-based lighting, contact shadows, jagged
-lightning, fireball-and-smoke explosions — with automatic quality scaling
-(or force it in ⚙ settings).
+Rendering: full cinematic pipeline — bloom + tilt-shift depth of field +
+filmic color grade (S-curve, teal/orange split-toning, vignette) on an MSAA
+render target; a living **day-night cycle** (golden hour fades into deep
+night with glowing lab windows, warm street lamps, fireflies and a starfield);
+drifting clouds that cast moving shadows; wind-swaying grass and trees via
+shader displacement; shader sky dome, sculpted backdrop hills, instanced
+grass and rocks, PMREM image-based lighting, bump-mapped terrain, trampled
+paths, contact shadows, jagged lightning and fireball-and-smoke explosions.
+Three quality tiers auto-scale for weak GPUs (or force in ⚙ settings).
 
 All 3D models, sound effects and music are real, downloaded, CC-licensed
 assets — see [ATTRIBUTION.md](ATTRIBUTION.md).

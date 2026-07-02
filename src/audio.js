@@ -35,7 +35,9 @@ export async function initAudio() {
   }));
 
   const lastPlay = {};
+  let playCount = 0;
   function play(name, vol = 1, rate = 1) {
+    playCount++;
     const buf = buffers[name];
     if (!buf || ctx.state !== 'running') return;
     const src = ctx.createBufferSource();
@@ -117,5 +119,5 @@ export async function initAudio() {
     }
   }
 
-  return { ctx, play, applyEvents, startMusic, buses: { master, sfxBus, musicBus } };
+  return { ctx, play, applyEvents, startMusic, buses: { master, sfxBus, musicBus }, get playCount() { return playCount; } };
 }

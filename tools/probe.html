@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<script type="importmap">{"imports":{"three":"../lib/three.module.js","three/addons/":"../lib/addons/"}}</script>
+</head><body>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+const files = ['Soldier','RobotExpressive','Xbot','platformer/kenney-character','city/building-garage','city/building-small-a','city/building-small-b','city/building-small-c','city/building-small-d','city/grass-trees','city/grass-trees-tall','city/pavement','city/pavement-fountain','platformer/coin','platformer/flag','fps/wall-high'];
+const loader = new GLTFLoader();
+const out = {};
+for (const f of files) {
+  try {
+    const g = await loader.loadAsync(`../assets/models/${f}.glb`);
+    const box = new THREE.Box3().setFromObject(g.scene);
+    const size = box.getSize(new THREE.Vector3());
+    let skinned = false; g.scene.traverse(o => { if (o.isSkinnedMesh) skinned = true; });
+    out[f] = { anims: g.animations.map(a => a.name), size: [size.x, size.y, size.z].map(v => +v.toFixed(2)), skinned };
+  } catch (e) { out[f] = { error: String(e).slice(0, 120) }; }
+}
+window.__probe = out;
+</script></body></html>

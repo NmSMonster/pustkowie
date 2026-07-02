@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"></head><body>
+<script>
+(async () => {
+  const files = ['sfx/blaster.mp3','sfx/lazer.wav','sfx/explosion.mp3','sfx/death.wav','sfx/shot.wav','sfx/squit.wav','sfx/pickup.wav','sfx/click.wav','sfx/cannon.mp3','sfx/coin.ogg','sfx/thud1.ogg','sfx/thud2.ogg','sfx/fall.ogg','sfx/pong.mp3','music/ambience.ogg','music/theme.mp3'];
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const out = {};
+  for (const f of files) {
+    try {
+      const buf = await (await fetch(`../assets/audio/${f}`)).arrayBuffer();
+      const dec = await ctx.decodeAudioData(buf);
+      out[f] = +dec.duration.toFixed(2);
+    } catch (e) { out[f] = 'ERR ' + String(e).slice(0, 60); }
+  }
+  window.__audio = out;
+})();
+</script></body></html>

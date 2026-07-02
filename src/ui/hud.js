@@ -206,6 +206,7 @@ export function initHud(state) {
         case 'eliminated':
           bigAlert(`${fd.name} has been shut down`, '#99a3b8');
           post(`${fd.name} eliminated`, '#99a3b8');
+          if (mine) showKnockout();
           break;
         case 'lowTrust':
           bigAlert('Public trust critical — regulators issue fines', '#ff9a4a');
@@ -227,6 +228,19 @@ export function initHud(state) {
   }
 
   // ---------- end / help / pause ----------
+  function showKnockout() {
+    const f = sim().fac(sim().playerFaction);
+    el('endscreen').style.display = 'flex';
+    el('endscreen').innerHTML = `
+      <div class="modalbox" style="border-color:#99a3b8">
+        <h1 style="color:#99a3b8">YOUR LAB HAS BEEN DISSOLVED</h1>
+        <p>Your Frontier Lab is rubble, your researchers have updated their LinkedIn profiles, and a rival's blog post calls it "consolidation in the ecosystem." The race goes on — without you.</p>
+        <p class="stats">Milestones ${f.milestone}/5 · Kills ${f.stats.kills} · Losses ${f.stats.losses}</p>
+        <button onclick="location.reload()">RUN IT BACK</button>
+        <button onclick="document.getElementById('endscreen').style.display='none'">WATCH THE FINISH</button>
+      </div>`;
+  }
+
   function showEnd(winnerId) {
     const win = winnerId === sim().playerFaction;
     const d = FACTIONS[winnerId];

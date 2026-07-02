@@ -7,7 +7,7 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { instance, tint, assets, desaturatedMap } from './assets.js';
+import { instance, tint, assets, desaturatedMap, stripBaseTile } from './assets.js';
 import { BUILDINGS, UNITS, FACTIONS, MAP } from '../sim/data.js';
 import { settings, onSettingsChange } from '../settings.js';
 
@@ -206,30 +206,185 @@ export class World {
     edge.position.y = 0.05;
     this.scene.add(edge);
 
-    // scattered trees away from bases and nodes
+    // organic tree clusters — tiles stripped, trunks rooted in the soil
     const rnd = (a, b) => a + Math.random() * (b - a);
     const clear = [...this.sim.nodes, ...Object.values(this.sim.factions).map(f => ({ x: f.base.x, z: f.base.z }))];
-    for (let i = 0; i < 34; i++) {
-      let x, z, ok = false, tries = 0;
-      while (!ok && tries++ < 30) {
-        x = rnd(-MAP.half + 4, MAP.half - 4); z = rnd(-MAP.half + 4, MAP.half - 4);
-        ok = clear.every(p => Math.hypot(p.x - x, p.z - z) > 13);
+    const variants = ['trees', 'treesTall'].map(k => {
+      const { geometry, material } = stripBaseTile(assets.models[k]);
+      const mat = material.clone();
+      if (mat.color) mat.color.lerp(new THREE.Color(0x27381f), 0.45); // dusk-darkened foliage
+      return { geometry, mat, spots: [] };
+    });
+    for (let c = 0; c < 14; c++) {
+      let cx, cz, ok = false, tries = 0;
+      while (!ok && tries++ < 40) {
+        cx = rnd(-MAP.half + 6, MAP.half - 6); cz = rnd(-MAP.half + 6, MAP.half - 6);
+        ok = clear.every(p => Math.hypot(p.x - cx, p.z - cz) > 13);
       }
       if (!ok) continue;
-      const t = tint(instance(Math.random() < 0.5 ? 'trees' : 'treesTall'), 0x33452a, 0.3);
-      t.scale.setScalar(rnd(3.4, 5.2));
-      t.position.set(x, 0, z);
-      t.rotation.y = rnd(0, Math.PI * 2);
-      this.scene.add(t);
+      const n = 2 + (Math.random() * 3 | 0);
+      for (let i = 0; i < n; i++) {
+        const a = Math.random() * Math.PI * 2, r = i === 0 ? 0 : rnd(1.6, 4.2);
+        variants[Math.random() < 0.55 ? 0 : 1].spots.push({
+          x: cx + Math.cos(a) * r, z: cz + Math.sin(a) * r,
+          s: rnd(3.1, 5.4), rot: rnd(0, Math.PI * 2), tilt: rnd(-0.035, 0.035),
+        });
+      }
+    }
+    const treeAO = [];
+    for (const v of variants) {
+      if (!v.spots.length) continue;
+      const im = new THREE.InstancedMesh(v.geometry, v.mat, v.spots.length);
+      im.castShadow = true; im.receiveShadow = true;
+      const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+      v.spots.forEach((sp, i) => {
+        e.set(sp.tilt, sp.rot, 0);
+        q.setFromEuler(e);
+        m.compose(new THREE.Vector3(sp.x, 0, sp.z), q, new THREE.Vector3(sp.s, sp.s * rnd(0.9, 1.12), sp.s));
+        im.setMatrixAt(i, m);
+        treeAO.push(sp);
+      });
+      this.scene.add(im);
+    }
+    // pooled contact shadows under every tree
+    if (treeAO.length) {
+      const aoMesh = new THREE.InstancedMesh(
+        new THREE.CircleGeometry(1, 20),
+        new THREE.MeshBasicMaterial({ map: this.aoTexture(), transparent: true, depthWrite: false }),
+        treeAO.length
+      );
+      aoMesh.renderOrder = 1;
+      const m = new THREE.Matrix4(), q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0, 0));
+      treeAO.forEach((sp, i) => {
+        m.compose(new THREE.Vector3(sp.x, 0.045, sp.z), q, new THREE.Vector3(sp.s * 0.55, sp.s * 0.55, 1));
+        aoMesh.setMatrixAt(i, m);
+      });
+      this.scene.add(aoMesh);
     }
 
-    // base pads
+    // circular concrete aprons under each lab, blended into the grass
     for (const f of Object.values(this.sim.factions)) {
-      const pad = instance('pavement');
-      pad.scale.set(10, 1, 10);
-      pad.position.set(f.base.x, 0.01, f.base.z);
+      const pad = new THREE.Mesh(
+        new THREE.CircleGeometry(10.5, 48),
+        new THREE.MeshStandardMaterial({ map: this.concretePadTexture(), transparent: true, roughness: 0.92, depthWrite: false })
+      );
+      pad.rotation.x = -Math.PI / 2;
+      pad.position.set(f.base.x, 0.03, f.base.z);
+      pad.receiveShadow = true;
       this.scene.add(pad);
     }
+
+    this.setupRocks();
+  }
+
+  concretePadTexture() {
+    if (this._concreteTex) return this._concreteTex;
+    const S = 512, c = document.createElement('canvas'); c.width = c.height = S;
+    const g = c.getContext('2d');
+    // asphalt disc with speckle, faint panel rings, soft blended edge
+    const grad = g.createRadialGradient(S / 2, S / 2, S * 0.1, S / 2, S / 2, S / 2);
+    grad.addColorStop(0, 'rgba(86,88,98,0.96)');
+    grad.addColorStop(0.75, 'rgba(74,76,86,0.95)');
+    grad.addColorStop(0.9, 'rgba(66,68,78,0.75)');
+    grad.addColorStop(1, 'rgba(60,62,72,0)');
+    g.fillStyle = grad;
+    g.beginPath(); g.arc(S / 2, S / 2, S / 2, 0, 7); g.fill();
+    for (let i = 0; i < 900; i++) {
+      const a = Math.random() * Math.PI * 2, r = Math.random() ** 0.5 * S * 0.46;
+      const x = S / 2 + Math.cos(a) * r, y = S / 2 + Math.sin(a) * r;
+      g.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,255,0.045)' : 'rgba(0,0,0,0.07)';
+      g.fillRect(x, y, 1.6 + Math.random() * 2, 1.6 + Math.random() * 2);
+    }
+    g.strokeStyle = 'rgba(0,0,0,0.16)'; g.lineWidth = 2;
+    for (const rr of [0.32, 0.62, 0.85]) {
+      g.beginPath(); g.arc(S / 2, S / 2, S / 2 * rr, 0, 7); g.stroke();
+    }
+    g.strokeStyle = 'rgba(255,215,120,0.16)'; g.lineWidth = 5;
+    g.beginPath(); g.arc(S / 2, S / 2, S / 2 * 0.94, 0, 7); g.stroke();
+    this._concreteTex = new THREE.CanvasTexture(c);
+    this._concreteTex.colorSpace = THREE.SRGBColorSpace;
+    return this._concreteTex;
+  }
+
+  plotTexture() {
+    if (this._plotTex) return this._plotTex;
+    const S = 256, c = document.createElement('canvas'); c.width = c.height = S;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(S / 2, S / 2, S * 0.2, S / 2, S / 2, S * 0.5);
+    grad.addColorStop(0, 'rgba(80,82,92,0.95)');
+    grad.addColorStop(0.8, 'rgba(70,72,82,0.85)');
+    grad.addColorStop(1, 'rgba(64,66,76,0)');
+    g.fillStyle = grad;
+    g.beginPath(); g.arc(S / 2, S / 2, S / 2, 0, 7); g.fill();
+    for (let i = 0; i < 260; i++) {
+      const a = Math.random() * Math.PI * 2, r = Math.random() ** 0.5 * S * 0.44;
+      g.fillStyle = Math.random() < 0.5 ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.08)';
+      g.fillRect(S / 2 + Math.cos(a) * r, S / 2 + Math.sin(a) * r, 2, 2);
+    }
+    this._plotTex = new THREE.CanvasTexture(c);
+    this._plotTex.colorSpace = THREE.SRGBColorSpace;
+    return this._plotTex;
+  }
+
+  nodePadTexture() {
+    if (this._nodePadTex) return this._nodePadTex;
+    const S = 256, c = document.createElement('canvas'); c.width = c.height = S;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(S / 2, S / 2, S * 0.08, S / 2, S / 2, S / 2);
+    grad.addColorStop(0, 'rgba(20,30,40,0.9)');
+    grad.addColorStop(0.78, 'rgba(16,26,36,0.85)');
+    grad.addColorStop(1, 'rgba(14,22,32,0)');
+    g.fillStyle = grad;
+    g.beginPath(); g.arc(S / 2, S / 2, S / 2, 0, 7); g.fill();
+    // glowing data ring + tick marks
+    g.strokeStyle = 'rgba(80,220,255,0.95)'; g.lineWidth = 5;
+    g.beginPath(); g.arc(S / 2, S / 2, S * 0.36, 0, 7); g.stroke();
+    g.strokeStyle = 'rgba(80,220,255,0.35)'; g.lineWidth = 11;
+    g.beginPath(); g.arc(S / 2, S / 2, S * 0.36, 0, 7); g.stroke();
+    g.strokeStyle = 'rgba(140,235,255,0.85)'; g.lineWidth = 3;
+    for (let i = 0; i < 12; i++) {
+      const a = i / 12 * Math.PI * 2;
+      g.beginPath();
+      g.moveTo(S / 2 + Math.cos(a) * S * 0.42, S / 2 + Math.sin(a) * S * 0.42);
+      g.lineTo(S / 2 + Math.cos(a) * S * 0.47, S / 2 + Math.sin(a) * S * 0.47);
+      g.stroke();
+    }
+    this._nodePadTex = new THREE.CanvasTexture(c);
+    this._nodePadTex.colorSpace = THREE.SRGBColorSpace;
+    return this._nodePadTex;
+  }
+
+  setupRocks() {
+    const N = 64;
+    const geo = new THREE.IcosahedronGeometry(0.55, 0);
+    const pa = geo.attributes.position;
+    for (let i = 0; i < pa.count; i++) {
+      pa.setXYZ(i,
+        pa.getX(i) * (0.82 + Math.random() * 0.4),
+        pa.getY(i) * (0.55 + Math.random() * 0.3),
+        pa.getZ(i) * (0.82 + Math.random() * 0.4));
+    }
+    geo.computeVertexNormals();
+    const mesh = new THREE.InstancedMesh(geo, new THREE.MeshStandardMaterial({ color: 0x8d8578, flatShading: true, roughness: 0.95 }), N);
+    mesh.castShadow = true; mesh.receiveShadow = true;
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), col = new THREE.Color();
+    const clear = [...this.sim.nodes, ...Object.values(this.sim.factions).map(f => ({ x: f.base.x, z: f.base.z }))];
+    let placed = 0, guard = 0;
+    while (placed < N && guard++ < N * 8) {
+      const x = (Math.random() * 2 - 1) * (MAP.half - 3);
+      const z = (Math.random() * 2 - 1) * (MAP.half - 3);
+      if (clear.some(p => Math.hypot(p.x - x, p.z - z) < 9)) continue;
+      e.set(0, Math.random() * Math.PI * 2, 0);
+      q.setFromEuler(e);
+      const sc = 0.35 + Math.random() * 0.85;
+      m.compose(new THREE.Vector3(x, sc * 0.12, z), q, new THREE.Vector3(sc, sc * 0.8, sc));
+      mesh.setMatrixAt(placed, m);
+      col.setHSL(0.09, 0.06 + Math.random() * 0.08, 0.38 + Math.random() * 0.16);
+      mesh.setColorAt(placed, col);
+      placed++;
+    }
+    mesh.count = placed;
+    this.scene.add(mesh);
   }
 
   grassTexture() {
@@ -308,8 +463,19 @@ export class World {
     for (const n of this.sim.nodes) {
       const grp = new THREE.Group();
       grp.position.set(n.x, 0, n.z);
-      const pad = instance('pavement');
-      pad.scale.set(4.5, 1, 4.5);
+      // worn earth beneath, then a glowing data pad
+      const dirt = new THREE.Mesh(
+        new THREE.CircleGeometry(4.6, 28),
+        new THREE.MeshBasicMaterial({ map: this.aoTexture(), transparent: true, depthWrite: false, color: 0x584a34, opacity: 0.55 })
+      );
+      dirt.rotation.x = -Math.PI / 2; dirt.position.y = 0.035;
+      grp.add(dirt);
+      const pad = new THREE.Mesh(
+        new THREE.CircleGeometry(3.1, 40),
+        new THREE.MeshBasicMaterial({ map: this.nodePadTexture(), transparent: true, depthWrite: false })
+      );
+      pad.rotation.x = -Math.PI / 2; pad.position.y = 0.06;
+      pad.renderOrder = 1;
       grp.add(pad);
       const coin = tint(instance('coin'), 0x39d5ff, 0.85);
       coin.traverse(o => { if (o.isMesh) { o.material.emissive = new THREE.Color(0x1899cc); o.material.emissiveIntensity = 1.6; } });
@@ -319,7 +485,6 @@ export class World {
       const glow = this.glowSprite(0x39d5ff, 7);
       glow.position.y = 1.2;
       grp.add(glow);
-      grp.add(this.contactShadow(3.4));
       grp.traverse(o => { o.userData.eid = n.id; });
       this.scene.add(grp);
       this.nodeViews.set(n.id, { grp, coin, glow, spin: Math.random() * 6 });
@@ -353,7 +518,15 @@ export class World {
     const grp = new THREE.Group();
     let model;
     if (b.kind === 'tower') {
-      model = tint(instance('wall'), color, 0.35);
+      model = instance('wall');
+      const fc = new THREE.Color(color);
+      model.traverse(o => {
+        if (o.isMesh && o.material) {
+          o.material = o.material.clone();
+          if (o.material.map) o.material.map = desaturatedMap(o.material.map);
+          if (o.material.color) o.material.color.copy(fc).lerp(new THREE.Color(0xffffff), 0.25);
+        }
+      });
       model.scale.set(1.1, 2.6, 1.1);
       const orb = new THREE.Mesh(
         new THREE.SphereGeometry(0.55, 16, 12),
@@ -379,8 +552,15 @@ export class World {
     }
     grp.add(model);
     grp.userData.model = model;
-    // soft contact shadow + faint faction glow the bloom can catch
-    grp.add(this.contactShadow(def.size * 0.85));
+    // concrete plot blended into grass + soft contact shadow
+    const plot = new THREE.Mesh(
+      new THREE.CircleGeometry(def.size * 0.92, 32),
+      new THREE.MeshStandardMaterial({ map: this.plotTexture(), transparent: true, roughness: 0.9, depthWrite: false })
+    );
+    plot.rotation.x = -Math.PI / 2; plot.position.y = 0.05;
+    plot.receiveShadow = true;
+    grp.add(plot);
+    grp.add(this.contactShadow(def.size * 0.8));
     model.traverse(o => {
       if (o.isMesh && o.material?.emissive) {
         o.material.emissive = new THREE.Color(color);

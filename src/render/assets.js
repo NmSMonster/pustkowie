@@ -82,6 +82,36 @@ export function desaturatedMap(fromTexture) {
   return out;
 }
 
+// Geometry surgery: Kenney nature tiles are ONE merged mesh (ground slab +
+// trees). Drop every triangle that never rises above the slab, re-root the
+// rest at y=0, and the trees grow straight out of the terrain.
+export function stripBaseTile(srcObj, yThreshold = 0.1) {
+  let mesh = null;
+  srcObj.updateMatrixWorld(true);
+  srcObj.traverse(o => { if (o.isMesh && !mesh) mesh = o; });
+  let geo = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone();
+  geo = geo.clone();
+  geo.applyMatrix4(mesh.matrixWorld);
+  const pos = geo.attributes.position, norm = geo.attributes.normal, uv = geo.attributes.uv;
+  const keepP = [], keepN = [], keepU = [];
+  for (let i = 0; i < pos.count; i += 3) {
+    const maxY = Math.max(pos.getY(i), pos.getY(i + 1), pos.getY(i + 2));
+    if (maxY <= yThreshold) continue;
+    for (let k = 0; k < 3; k++) {
+      keepP.push(pos.getX(i + k), pos.getY(i + k), pos.getZ(i + k));
+      if (norm) keepN.push(norm.getX(i + k), norm.getY(i + k), norm.getZ(i + k));
+      if (uv) keepU.push(uv.getX(i + k), uv.getY(i + k));
+    }
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.Float32BufferAttribute(keepP, 3));
+  if (keepN.length) out.setAttribute('normal', new THREE.Float32BufferAttribute(keepN, 3));
+  if (keepU.length) out.setAttribute('uv', new THREE.Float32BufferAttribute(keepU, 2));
+  out.computeBoundingBox();
+  out.translate(0, -out.boundingBox.min.y - 0.03, 0); // roots kiss the soil
+  return { geometry: out, material: mesh.material };
+}
+
 export function tint(obj, hex, strength = 0.55) {
   const c = new THREE.Color(hex);
   obj.traverse(o => {

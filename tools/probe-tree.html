@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8">
+<script type="importmap">{"imports":{"three":"../lib/three.module.js","three/addons/":"../lib/addons/"}}</script>
+</head><body><script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+const loader = new GLTFLoader();
+const out = {};
+for (const f of ['grass-trees', 'grass-trees-tall', 'pavement']) {
+  const g = await loader.loadAsync(`../assets/models/city/${f}.glb`);
+  const nodes = [];
+  g.scene.traverse(o => {
+    if (o.isMesh) {
+      const b = new THREE.Box3().setFromObject(o);
+      const s = b.getSize(new THREE.Vector3());
+      nodes.push({ name: o.name, parent: o.parent?.name, size: [s.x, s.y, s.z].map(v => +v.toFixed(2)), pos: [o.position.x, o.position.y, o.position.z].map(v => +v.toFixed(2)) });
+    }
+  });
+  out[f] = nodes;
+}
+window.__probe = out;
+</script></body></html>

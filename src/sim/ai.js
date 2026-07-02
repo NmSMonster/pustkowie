@@ -1,6 +1,6 @@
 // Rival lab AI. Each faction runs the same controller with personality weights
 // from FACTIONS[fid].ai: { aggression, econ, tech, trustCare }.
-import { UNITS, BUILDINGS, MILESTONES, ABILITIES, TRUST } from './data.js';
+import { UNITS, BUILDINGS, MILESTONES, ABILITIES, TRUST, PACT } from './data.js';
 
 export class LabAI {
   constructor(sim, fid) {
@@ -10,6 +10,7 @@ export class LabAI {
     this.thinkT = sim.rand() * 1;
     this.raid = null; // { targetFid }
     this.raidCdT = 0;
+    this.diploT = 20 + sim.rand() * 20;
     this.buildCursor = 0;
   }
 
@@ -25,6 +26,7 @@ export class LabAI {
     this.manageResearch(f);
     this.manageMilitary(f);
     this.manageAbilities(f);
+    this.manageDiplomacy(f);
   }
 
   // ---------- economy ----------
@@ -161,7 +163,7 @@ export class LabAI {
 
   pickRaidTarget(f) {
     const s = this.sim;
-    const others = Object.values(s.factions).filter(o => o.alive && o.id !== this.fid);
+    const others = Object.values(s.factions).filter(o => o.alive && o.id !== this.fid && !s.hasPact(this.fid, o.id));
     if (!others.length) return null;
     // prefer the race leader; xAI just hits whoever is richest
     others.sort((a, b) =>
@@ -187,6 +189,56 @@ export class LabAI {
     return { x: t.x, z: t.z };
   }
 
+  // ---------- diplomacy ----------
+  manageDiplomacy(f) {
+    const s = this.sim;
+    this.diploT -= 1;
+    if (this.diploT > 0) return;
+    this.diploT = 18 + s.rand() * 14;
+
+    const myPacts = s.pactsOf(this.fid);
+    const myScore = f.milestone + f.researchProgress;
+
+    // betrayal: turn on a partner who is about to win, or on a whim (xAI)
+    for (const p of myPacts) {
+      const partnerId = p.a === this.fid ? p.b : p.a;
+      const partner = s.fac(partnerId);
+      const partnerLeads = partner.milestone + partner.researchProgress > myScore + 0.4;
+      const finalRun = partner.researching && partner.milestone === 4;
+      if (finalRun || (partnerLeads && partner.milestone >= 3 && s.rand() < 0.5) || s.rand() < 0.03 * this.p.aggression) {
+        s.breakPact(this.fid, partnerId, this.fid, true);
+        // immediate punitive raid with whatever army is standing around
+        const army = s.units.filter(u => !u.dead && u.faction === this.fid && u.kind !== 'researcher'
+          && (u.order.type === 'idle' || u.order.type === 'attackmove_hold'));
+        if (army.length >= 3) {
+          this.raid = { targetFid: partnerId };
+          this.raidCdT = 40;
+          const spot = this.pickRaidSpot(partner);
+          s.cmdMove(army.map(u => u.id), spot.x, spot.z, true);
+          s.emit({ type: 'raidLaunched', fid: this.fid, victim: partnerId });
+        }
+        return;
+      }
+    }
+
+    // coalition: trailing labs gang up against a runaway leader
+    if (!myPacts.length) {
+      const leader = s.raceLeader();
+      if (leader && leader.id !== this.fid && (leader.milestone + leader.researchProgress) - myScore >= 0.8) {
+        const partners = Object.values(s.factions).filter(o =>
+          o.alive && o.id !== this.fid && o.id !== leader.id && !s.hasPact(this.fid, o.id));
+        // prefer the strongest fellow trailer
+        partners.sort((a, b) => (b.milestone + b.researchProgress) - (a.milestone + a.researchProgress));
+        const target = partners[0];
+        if (target) {
+          if ((s.grudges[s.pactKey(this.fid, target.id)] || 0) > 0) return;
+          if (target.isPlayer) s.proposePactToPlayer(this.fid);
+          else if (s.rand() < 0.5 + target.def.ai.trustCare * 0.4) s.formPact(this.fid, target.id);
+        }
+      }
+    }
+  }
+
   // ---------- abilities ----------
   manageAbilities(f) {
     const s = this.sim;
@@ -204,7 +256,7 @@ export class LabAI {
     }
     // poach when rich and unscrupulous
     if (this.p.trustCare < 0.6 && f.compute > 400 && s.rand() < 0.25) {
-      const victims = s.units.filter(u => !u.dead && u.kind === 'researcher' && u.faction !== this.fid);
+      const victims = s.units.filter(u => !u.dead && u.kind === 'researcher' && u.faction !== this.fid && !s.hasPact(this.fid, u.faction));
       if (victims.length) s.cmdAbility(this.fid, 'poach', victims[Math.floor(s.rand() * victims.length)].id);
     }
   }

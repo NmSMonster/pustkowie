@@ -1,8 +1,33 @@
 // Renderer: owns the three.js scene and mirrors sim state into views.
 // The sim never imports this; this reads sim state + drains sim events.
 import * as THREE from 'three';
-import { instance, tint, assets } from './assets.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { instance, tint, assets, desaturatedMap } from './assets.js';
 import { BUILDINGS, UNITS, FACTIONS, MAP } from '../sim/data.js';
+import { settings, onSettingsChange } from '../settings.js';
+
+// final color grade: vignette + gentle saturation + warm cast (runs pre-tonemap)
+const GradeShader = {
+  uniforms: { tDiffuse: { value: null } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse; varying vec2 vUv;
+    void main(){
+      vec4 t = texture2D(tDiffuse, vUv);
+      vec3 c = t.rgb;
+      float d = distance(vUv, vec2(0.5));
+      c *= 1.0 - smoothstep(0.5, 0.95, d) * 0.42;
+      float l = dot(c, vec3(0.299, 0.587, 0.114));
+      c = mix(vec3(l), c, 1.12);
+      c *= vec3(1.035, 1.0, 0.965);
+      gl_FragColor = vec4(c, t.a);
+    }`,
+};
 
 const UNIT_MODEL = { researcher: 'xbot', agent: 'robot', sentinel: 'soldier' };
 const UNIT_SCALE = { researcher: 1.15, agent: 0.44, sentinel: 1.15 };
@@ -16,11 +41,11 @@ export class World {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.25;
+    this.renderer.toneMappingExposure = 1.5;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x0b1020);
-    this.scene.fog = new THREE.Fog(0x0b1020, 130, 320);
+    this.scene.background = new THREE.Color(0x131228);
+    this.scene.fog = new THREE.Fog(0x201c38, 150, 330);
 
     this.camera = new THREE.PerspectiveCamera(46, window.innerWidth / window.innerHeight, 0.5, 400);
     // camera rig: focus point on ground + spherical offset
@@ -32,24 +57,36 @@ export class World {
     this.raycaster = new THREE.Raycaster();
 
     this.setupLights();
+    this.setupSky();
     this.setupTerrain();
     this.setupNodes();
 
+    // image-based lighting for material sheen
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.35;
+
+    this.setupComposer();
+
     // auto-quality: step down when fps stays low (helps weak GPUs)
     this._fpsAcc = 0; this._fpsN = 0; this._qLevel = 0;
+    this.applyQualitySetting();
+    onSettingsChange(() => this.applyQualitySetting());
 
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(window.innerWidth, window.innerHeight);
+      this.composer?.setSize(window.innerWidth, window.innerHeight);
+      this.bloom?.setSize(window.innerWidth, window.innerHeight);
     });
   }
 
   // ---------------- environment ----------------
   setupLights() {
-    this.scene.add(new THREE.HemisphereLight(0x9db1ff, 0x27351d, 1.05));
-    const sun = new THREE.DirectionalLight(0xffe3b8, 2.6);
-    sun.position.set(60, 80, 30);
+    this.scene.add(new THREE.HemisphereLight(0x7c8fd4, 0x3d3a24, 1.3));
+    const sun = new THREE.DirectionalLight(0xffc896, 3.2);
+    sun.position.set(55, 58, -80);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
     const s = 95;
@@ -57,19 +94,64 @@ export class World {
     sun.shadow.bias = -0.0004;
     this.scene.add(sun);
     this.sun = sun;
-    const rim = new THREE.DirectionalLight(0x5b7bff, 0.55);
-    rim.position.set(-50, 40, -60);
+    const rim = new THREE.DirectionalLight(0x6a8cff, 0.6);
+    rim.position.set(-50, 45, 70);
     this.scene.add(rim);
+  }
+
+  // ---------------- sky ----------------
+  setupSky() {
+    const mat = new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false, fog: false,
+      vertexShader: `varying vec3 vPos; void main(){ vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+      fragmentShader: `
+        varying vec3 vPos;
+        void main(){
+          vec3 dir = normalize(vPos);
+          float h = dir.y;
+          vec3 zenith  = vec3(0.030, 0.045, 0.115);
+          vec3 mid     = vec3(0.135, 0.120, 0.255);
+          vec3 horizon = vec3(0.92, 0.45, 0.22);
+          vec3 c = mix(mid, zenith, smoothstep(0.10, 0.55, h));
+          c = mix(horizon, c, smoothstep(-0.03, 0.16, h));
+          vec3 sunDir = normalize(vec3(0.5, 0.42, -0.72));
+          float sunAmt = max(dot(dir, sunDir), 0.0);
+          c += vec3(1.0, 0.60, 0.28) * pow(sunAmt, 60.0) * 1.6;
+          c += vec3(0.9, 0.48, 0.24) * pow(sunAmt, 6.0) * 0.30;
+          gl_FragColor = vec4(c, 1.0);
+        }`,
+    });
+    const sky = new THREE.Mesh(new THREE.SphereGeometry(340, 32, 16), mat);
+    sky.renderOrder = -10;
+    this.scene.add(sky);
+    // faint stars up high
+    const pos = [];
+    for (let i = 0; i < 320; i++) {
+      const a = Math.random() * Math.PI * 2, e = 0.28 + Math.random() * 1.2, r = 330;
+      pos.push(Math.cos(a) * Math.cos(e) * r, Math.sin(e) * r, Math.sin(a) * Math.cos(e) * r);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    this.scene.add(new THREE.Points(g, new THREE.PointsMaterial({
+      color: 0xbfd0ff, size: 1.3, sizeAttenuation: false, transparent: true, opacity: 0.65, fog: false,
+    })));
+  }
+
+  noise2(x, z) {
+    const xi = Math.floor(x), zi = Math.floor(z), xf = x - xi, zf = z - zi;
+    const h = (a, b) => { const v = Math.sin(a * 127.1 + b * 311.7) * 43758.5453; return v - Math.floor(v); };
+    const u = xf * xf * (3 - 2 * xf), v = zf * zf * (3 - 2 * zf);
+    return (h(xi, zi) * (1 - u) + h(xi + 1, zi) * u) * (1 - v) + (h(xi, zi + 1) * (1 - u) + h(xi + 1, zi + 1) * u) * v - 0.5;
   }
 
   groundTexture() {
     const c = document.createElement('canvas');
     c.width = c.height = 1024;
     const g = c.getContext('2d');
-    g.fillStyle = '#35452b'; g.fillRect(0, 0, 1024, 1024);
+    g.fillStyle = '#3d5031'; g.fillRect(0, 0, 1024, 1024);
     for (let i = 0; i < 2600; i++) {
       const x = Math.random() * 1024, y = Math.random() * 1024, r = 6 + Math.random() * 26;
-      g.fillStyle = `rgba(${44 + Math.random() * 34 | 0},${70 + Math.random() * 34 | 0},${36 + Math.random() * 20 | 0},0.16)`;
+      g.fillStyle = `rgba(${52 + Math.random() * 36 | 0},${82 + Math.random() * 36 | 0},${42 + Math.random() * 22 | 0},0.16)`;
       g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
     }
     g.strokeStyle = 'rgba(255,255,255,0.028)'; g.lineWidth = 1;
@@ -79,21 +161,41 @@ export class World {
     }
     const tex = new THREE.CanvasTexture(c);
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.repeat.set(4, 4);
+    tex.repeat.set(9, 9);
     tex.colorSpace = THREE.SRGBColorSpace;
     return tex;
   }
 
   setupTerrain() {
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(MAP.size + 60, MAP.size + 60),
-      new THREE.MeshStandardMaterial({ map: this.groundTexture(), roughness: 0.95 })
-    );
-    ground.rotation.x = -Math.PI / 2;
+    // Rolling hills as a backdrop OUTSIDE the playable square; inside stays flat
+    // so gameplay/picking never fight the terrain.
+    const size = 470, seg = 108;
+    const geo = new THREE.PlaneGeometry(size, size, seg, seg);
+    geo.rotateX(-Math.PI / 2);
+    const posA = geo.attributes.position;
+    const cols = [];
+    const cLow = new THREE.Color(0x495c36), cHigh = new THREE.Color(0x637e46), cRock = new THREE.Color(0x77644a);
+    for (let i = 0; i < posA.count; i++) {
+      const x = posA.getX(i), z = posA.getZ(i);
+      const edge = Math.max(Math.abs(x), Math.abs(z));
+      const t = THREE.MathUtils.smoothstep(edge, MAP.half + 4, MAP.half + 46);
+      const hgt = t * (this.noise2(x * 0.024, z * 0.024) * 10 + this.noise2(x * 0.075, z * 0.075) * 3.2 + t * 7);
+      posA.setY(i, hgt);
+      const n = this.noise2(x * 0.05 + 9, z * 0.05 - 7) + 0.5;
+      const c = cLow.clone().lerp(cHigh, THREE.MathUtils.clamp(n, 0, 1));
+      if (hgt > 2.5) c.lerp(cRock, Math.min(1, (hgt - 2.5) / 11) * 0.75);
+      cols.push(c.r, c.g, c.b);
+    }
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+    geo.computeVertexNormals();
+    const ground = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+      map: this.groundTexture(), vertexColors: true, roughness: 0.95,
+    }));
     ground.receiveShadow = true;
     ground.name = 'ground';
     this.ground = ground;
     this.scene.add(ground);
+    this.setupGrass();
 
     // map edge glow frame
     const edge = new THREE.Mesh(
@@ -114,7 +216,7 @@ export class World {
         ok = clear.every(p => Math.hypot(p.x - x, p.z - z) > 13);
       }
       if (!ok) continue;
-      const t = instance(Math.random() < 0.5 ? 'trees' : 'treesTall');
+      const t = tint(instance(Math.random() < 0.5 ? 'trees' : 'treesTall'), 0x33452a, 0.3);
       t.scale.setScalar(rnd(3.4, 5.2));
       t.position.set(x, 0, z);
       t.rotation.y = rnd(0, Math.PI * 2);
@@ -130,6 +232,77 @@ export class World {
     }
   }
 
+  grassTexture() {
+    const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+    const g = c.getContext('2d');
+    for (let i = 0; i < 7; i++) {
+      const x = 8 + i * 8 + (Math.random() - 0.5) * 5;
+      g.strokeStyle = `rgba(${38 + Math.random() * 22 | 0}, ${72 + Math.random() * 30 | 0}, ${32 + Math.random() * 18 | 0}, 0.9)`;
+      g.lineWidth = 2;
+      g.beginPath();
+      g.moveTo(x, 64);
+      g.quadraticCurveTo(x + (Math.random() - 0.5) * 10, 34, x + (Math.random() - 0.5) * 16, 6 + Math.random() * 12);
+      g.stroke();
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  }
+
+  setupGrass() {
+    const N = 1500;
+    const geo = new THREE.PlaneGeometry(1.5, 1.15);
+    geo.translate(0, 0.48, 0);
+    const mat = new THREE.MeshStandardMaterial({
+      map: this.grassTexture(), alphaTest: 0.45, side: THREE.DoubleSide, roughness: 1,
+    });
+    const mesh = new THREE.InstancedMesh(geo, mat, N);
+    mesh.castShadow = false;
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
+    const col = new THREE.Color();
+    const clear = [...this.sim.nodes, ...Object.values(this.sim.factions).map(f => ({ x: f.base.x, z: f.base.z }))];
+    let placed = 0, guard = 0;
+    while (placed < N && guard++ < N * 6) {
+      const x = (Math.random() * 2 - 1) * (MAP.half - 2);
+      const z = (Math.random() * 2 - 1) * (MAP.half - 2);
+      if (clear.some(p => Math.hypot(p.x - x, p.z - z) < 7)) continue;
+      q.setFromAxisAngle(up, Math.random() * Math.PI);
+      const sc = 0.7 + Math.random() * 0.6;
+      m.compose(new THREE.Vector3(x, 0, z), q, new THREE.Vector3(sc, sc * (0.8 + Math.random() * 0.5), sc));
+      mesh.setMatrixAt(placed, m);
+      col.setHSL(0.25 + Math.random() * 0.05, 0.4, 0.27 + Math.random() * 0.12);
+      mesh.setColorAt(placed, col);
+      placed++;
+    }
+    mesh.count = placed;
+    this.grass = mesh;
+    this.scene.add(mesh);
+  }
+
+  aoTexture() {
+    if (this._aoTex) return this._aoTex;
+    const c = document.createElement('canvas'); c.width = c.height = 128;
+    const g = c.getContext('2d');
+    const gr = g.createRadialGradient(64, 64, 8, 64, 64, 64);
+    gr.addColorStop(0, 'rgba(0,0,0,0.5)');
+    gr.addColorStop(0.7, 'rgba(0,0,0,0.22)');
+    gr.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+    this._aoTex = new THREE.CanvasTexture(c);
+    return this._aoTex;
+  }
+
+  contactShadow(radius) {
+    const m = new THREE.Mesh(
+      new THREE.CircleGeometry(radius, 24),
+      new THREE.MeshBasicMaterial({ map: this.aoTexture(), transparent: true, depthWrite: false })
+    );
+    m.rotation.x = -Math.PI / 2;
+    m.position.y = 0.04;
+    m.renderOrder = 1;
+    return m;
+  }
+
   setupNodes() {
     this.nodeViews = new Map();
     for (const n of this.sim.nodes) {
@@ -139,13 +312,14 @@ export class World {
       pad.scale.set(4.5, 1, 4.5);
       grp.add(pad);
       const coin = tint(instance('coin'), 0x39d5ff, 0.85);
-      coin.traverse(o => { if (o.isMesh) { o.material.emissive = new THREE.Color(0x1899cc); o.material.emissiveIntensity = 0.9; } });
+      coin.traverse(o => { if (o.isMesh) { o.material.emissive = new THREE.Color(0x1899cc); o.material.emissiveIntensity = 1.6; } });
       coin.scale.setScalar(5);
       coin.position.y = 1.6;
       grp.add(coin);
       const glow = this.glowSprite(0x39d5ff, 7);
       glow.position.y = 1.2;
       grp.add(glow);
+      grp.add(this.contactShadow(3.4));
       grp.traverse(o => { o.userData.eid = n.id; });
       this.scene.add(grp);
       this.nodeViews.set(n.id, { grp, coin, glow, spin: Math.random() * 6 });
@@ -191,15 +365,38 @@ export class World {
       const g = this.glowSprite(color, 3.2);
       g.position.y = 4.9; grp.add(g);
     } else {
-      model = tint(instance(b.kind), color, b.kind === 'hq' ? 0.62 : 0.38);
+      model = instance(b.kind);
+      const fc = new THREE.Color(color);
+      model.traverse(o => {
+        if (o.isMesh && o.material) {
+          o.material = o.material.clone();
+          if (o.material.map) o.material.map = desaturatedMap(o.material.map);
+          if (o.material.color) o.material.color.copy(fc).lerp(new THREE.Color(0xffffff), b.kind === 'hq' ? 0.15 : 0.3);
+        }
+      });
       const sc = def.size / (b.kind === 'hq' ? 1.05 : 1.0);
       model.scale.set(sc, sc, sc);
     }
     grp.add(model);
     grp.userData.model = model;
+    // soft contact shadow + faint faction glow the bloom can catch
+    grp.add(this.contactShadow(def.size * 0.85));
+    model.traverse(o => {
+      if (o.isMesh && o.material?.emissive) {
+        o.material.emissive = new THREE.Color(color);
+        o.material.emissiveIntensity = 0.06;
+      }
+    });
 
     if (b.kind === 'hq') {
-      const flag = tint(instance('flag'), color, 0.85);
+      const flag = instance('flag');
+      flag.traverse(o => {
+        if (o.isMesh && o.material) {
+          o.material = o.material.clone();
+          if (o.material.map) o.material.map = desaturatedMap(o.material.map);
+          if (o.material.color) o.material.color.set(color);
+        }
+      });
       flag.scale.setScalar(3.2);
       flag.position.set(def.size * 0.62, 0, def.size * 0.62);
       grp.add(flag);
@@ -327,8 +524,11 @@ export class World {
       // tower orb pulse
       const orb = v.grp.userData.orb;
       if (orb) orb.material.emissiveIntensity = 1.8 + Math.sin(performance.now() / 300 + b.x) * 0.7;
-      // damage flash
+      // damage flash + smolder when badly hurt
       if (b.hitT > 0) this.flashGroup(v.grp, b.hitT);
+      if (b.done && b.hp / b.maxHp < 0.45 && Math.random() < dt * 2.2) {
+        this.smoke(b.x + (Math.random() - 0.5) * 1.6, BUILDINGS[b.kind].size * 1.1, b.z + (Math.random() - 0.5) * 1.6, 1.6, 1.8);
+      }
       this.updateHpBar(v, b, selection.has(b.id));
       this.updateRing?.(v, b, selection);
     }
@@ -418,12 +618,75 @@ export class World {
   }
 
   // ---------------- effects ----------------
+  smokeTexture() {
+    if (this._smokeTex) return this._smokeTex;
+    const c = document.createElement('canvas'); c.width = c.height = 128;
+    const g = c.getContext('2d');
+    for (let i = 0; i < 14; i++) {
+      const x = 34 + Math.random() * 60, y = 34 + Math.random() * 60, r = 14 + Math.random() * 22;
+      const gr = g.createRadialGradient(x, y, 2, x, y, r);
+      gr.addColorStop(0, 'rgba(58,54,52,0.55)');
+      gr.addColorStop(1, 'rgba(58,54,52,0)');
+      g.fillStyle = gr;
+      g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+    }
+    this._smokeTex = new THREE.CanvasTexture(c);
+    return this._smokeTex;
+  }
+
+  smoke(x, y, z, scale = 2.2, life = 1.6) {
+    const m = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: this.smokeTexture(), transparent: true, depthWrite: false, opacity: 0.65,
+      rotation: Math.random() * Math.PI * 2,
+    }));
+    m.position.set(x + (Math.random() - 0.5), y, z + (Math.random() - 0.5));
+    m.scale.setScalar(scale * (0.7 + Math.random() * 0.6));
+    this.scene.add(m);
+    this.effects.push({ obj: m, t: 0, life: life * (0.8 + Math.random() * 0.5), kind: 'smoke', rise: 1.2 + Math.random() });
+  }
+
+  lightning(from, to, color) {
+    const a = new THREE.Vector3(from.x, from.y ?? 3, from.z);
+    const b = new THREE.Vector3(to.x, to.y ?? 1.1, to.z);
+    const pts = [];
+    const N = 7;
+    for (let i = 0; i <= N; i++) {
+      const t = i / N;
+      const p = a.clone().lerp(b, t);
+      if (i > 0 && i < N) {
+        p.x += (Math.random() - 0.5) * 1.7;
+        p.y += (Math.random() - 0.5) * 1.3;
+        p.z += (Math.random() - 0.5) * 1.7;
+      }
+      pts.push(p);
+    }
+    const curve = new THREE.CatmullRomCurve3(pts);
+    const mk = (r, c, op) => {
+      const m = new THREE.Mesh(
+        new THREE.TubeGeometry(curve, 22, r, 5),
+        new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: op, blending: THREE.AdditiveBlending, depthWrite: false })
+      );
+      this.scene.add(m);
+      this.effects.push({ obj: m, t: 0, life: 0.17, kind: 'flash' });
+    };
+    mk(0.26, color, 0.5);
+    mk(0.07, 0xffffff, 1);
+  }
+
   explode(x, z, size = 2) {
-    // fireball flash
-    const flash = this.glowSprite(0xffa53a, size * 5);
+    // fireball
+    const fb = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 14, 10),
+      new THREE.MeshBasicMaterial({ color: 0xffa53a, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false })
+    );
+    fb.position.set(x, 1.4, z);
+    this.scene.add(fb);
+    this.effects.push({ obj: fb, t: 0, life: 0.45, kind: 'fireball', grow: size * 2.4 });
+    const flash = this.glowSprite(0xffc06a, size * 6);
     flash.position.set(x, 1.5, z);
     this.scene.add(flash);
-    this.effects.push({ obj: flash, t: 0, life: 0.5, kind: 'flash' });
+    this.effects.push({ obj: flash, t: 0, life: 0.4, kind: 'flash' });
+    for (let i = 0; i < 4; i++) this.smoke(x + (Math.random() - 0.5) * size, 1.5 + Math.random() * 1.5, z + (Math.random() - 0.5) * size, size * 1.6, 2);
     // shockwave ring
     const ring = new THREE.Mesh(
       new THREE.RingGeometry(0.4, 0.9, 36),
@@ -500,6 +763,14 @@ export class World {
         e.obj.position.x += e.vx * dt; e.obj.position.y += e.vy * dt; e.obj.position.z += e.vz * dt;
         if (e.obj.position.y < 0.1) e.obj.position.y = 0.1;
         e.obj.material.opacity = 1 - f;
+      } else if (e.kind === 'fireball') {
+        const s2 = 1 + f * e.grow;
+        e.obj.scale.setScalar(s2);
+        e.obj.material.opacity = 1 - f * f;
+      } else if (e.kind === 'smoke') {
+        e.obj.position.y += e.rise * dt;
+        e.obj.scale.multiplyScalar(1 + dt * 0.65);
+        e.obj.material.opacity = 0.65 * (1 - f);
       } else if (e.kind === 'beam') {
         e.obj.material.opacity = 0.7 * (1 - f * f);
         e.obj.rotation.y += dt * 3;
@@ -521,7 +792,7 @@ export class World {
           this.burst(e.to.x, 1.2, e.to.z, 0xffffff, 4, 3);
           break;
         case 'zap':
-          this.tracer({ x: e.from.x, y: e.from.y ?? 3, z: e.from.z }, { x: e.to.x, y: 1.0, z: e.to.z }, FACTIONS[e.fid].color, 0.14, 0.18);
+          this.lightning({ x: e.from.x, y: e.from.y ?? 3, z: e.from.z }, { x: e.to.x, y: 1.0, z: e.to.z }, FACTIONS[e.fid].color);
           this.burst(e.to.x, 1.0, e.to.z, FACTIONS[e.fid].color, 5, 4);
           break;
         case 'unitDied':
@@ -634,24 +905,63 @@ export class World {
     return hit ? { x: hit.point.x, z: hit.point.z } : null;
   }
 
+  setupComposer() {
+    const w = window.innerWidth, h = window.innerHeight;
+    const rt = new THREE.WebGLRenderTarget(w, h, { samples: 4, type: THREE.HalfFloatType });
+    this.composer = new EffectComposer(this.renderer, rt);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.5, 0.85);
+    this.composer.addPass(this.bloom);
+    this.composer.addPass(new ShaderPass(GradeShader));
+    this.composer.addPass(new OutputPass());
+    this.postFX = true;
+  }
+
+  setTier(n) {
+    this._qLevel = n;
+    if (n === 0) {
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      this.renderer.shadowMap.enabled = true;
+      this.sun.castShadow = true;
+      this.sun.shadow.mapSize.set(2048, 2048);
+      this.sun.shadow.map?.dispose(); this.sun.shadow.map = null;
+      this.postFX = true;
+      if (this.grass) this.grass.visible = true;
+    } else if (n === 1) {
+      this.renderer.setPixelRatio(1);
+      this.renderer.shadowMap.enabled = true;
+      this.sun.castShadow = true;
+      this.sun.shadow.mapSize.set(1024, 1024);
+      this.sun.shadow.map?.dispose(); this.sun.shadow.map = null;
+      this.postFX = true;
+      if (this.grass) this.grass.visible = true;
+    } else {
+      this.renderer.shadowMap.enabled = false;
+      this.sun.castShadow = false;
+      this.postFX = false;
+      if (this.grass) this.grass.visible = false;
+    }
+  }
+
+  applyQualitySetting() {
+    const maxq = new URLSearchParams(location.search).get('maxq');
+    if (maxq || settings.quality === 'high') { this._lockQ = true; this.setTier(0); return; }
+    if (settings.quality === 'low') { this._lockQ = true; this.setTier(2); return; }
+    this._lockQ = false;
+  }
+
   autoQuality(dt) {
-    if (this._lockQ === undefined) this._lockQ = !!new URLSearchParams(location.search).get('maxq');
     if (this._lockQ) return;
     this._fpsAcc += dt; this._fpsN++;
     if (this._fpsAcc < 3) return;
     const fps = this._fpsN / this._fpsAcc;
     this._fpsAcc = 0; this._fpsN = 0;
-    if (fps < 24 && this._qLevel === 0) {
-      this._qLevel = 1;
-      this.renderer.setPixelRatio(1);
-      this.sun.shadow.mapSize.set(1024, 1024);
-      this.sun.shadow.map?.dispose(); this.sun.shadow.map = null;
-    } else if (fps < 16 && this._qLevel === 1) {
-      this._qLevel = 2;
-      this.renderer.shadowMap.enabled = false;
-      this.sun.castShadow = false;
-    }
+    if (fps < 24 && this._qLevel === 0) this.setTier(1);
+    else if (fps < 15 && this._qLevel === 1) this.setTier(2);
   }
 
-  render() { this.renderer.render(this.scene, this.camera); }
+  render() {
+    if (this.postFX && this.composer) this.composer.render();
+    else this.renderer.render(this.scene, this.camera);
+  }
 }

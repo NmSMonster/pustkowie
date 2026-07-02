@@ -1,5 +1,6 @@
 // WebAudio: real SFX driven by sim events + quiet music bed.
 // Throttled per event type; volume falls off with distance from camera focus.
+import { settings, onSettingsChange } from './settings.js';
 const FILES = {
   blaster: 'assets/audio/sfx/blaster.mp3',
   lazer: 'assets/audio/sfx/lazer.wav',
@@ -21,10 +22,15 @@ const FILES = {
 export async function initAudio() {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const master = ctx.createGain();
-  master.gain.value = 0.9;
   master.connect(ctx.destination);
   const sfxBus = ctx.createGain(); sfxBus.connect(master);
-  const musicBus = ctx.createGain(); musicBus.gain.value = 0.14; musicBus.connect(master);
+  const musicBus = ctx.createGain(); musicBus.connect(master);
+  const applyVolumes = () => {
+    master.gain.value = settings.master;
+    musicBus.gain.value = 0.3 * settings.music;
+  };
+  applyVolumes();
+  onSettingsChange(applyVolumes);
 
   const buffers = {};
   await Promise.all(Object.entries(FILES).map(async ([k, url]) => {
@@ -114,6 +120,14 @@ export async function initAudio() {
         case 'eliminated': play('explosion', 0.8, 0.7); play('cannon', 0.6, 0.6); break;
         case 'victory':
           play('pickup', 1); setTimeout(() => play('coin', 0.9), 250); setTimeout(() => play('pickup', 0.9, 1.3), 500);
+          break;
+        case 'worldEvent': play('pickup', 0.55, 0.7); break;
+        case 'pactOffer': break; // hud plays its own chime
+        case 'pactFormed':
+          if (e.a === state?.sim?.playerFaction || e.b === state?.sim?.playerFaction) play('coin', 0.7, 0.9);
+          break;
+        case 'pactBroken':
+          if (e.betrayal && (e.a === state?.sim?.playerFaction || e.b === state?.sim?.playerFaction)) play('death', 0.8, 0.6);
           break;
       }
     }

@@ -26,6 +26,8 @@ No build step. Plain ES modules + Three.js from `lib/`.
 | Army | **Agents** (melee cyber-raiders) and **Sentinels** (ranged security), countered by **Firewall Towers** |
 | Diplomacy screen | **Trust** (public perception): high trust speeds research, low trust brings regulatory fines. Poaching, probes and raids all cost trust |
 | Spells | **Poach Talent** (steal a rival researcher), **Regulatory Probe** (halve a rival's compute), **State Subsidy**, **PR Campaign** |
+| Diplomacy | **Non-aggression pacts** (+0.6⚡/s shared infra each) — trailing labs form coalitions against the leader, offer you deals mid-game, and **betray** partners who get too close to winning. Betrayal costs trust and earns a long grudge |
+| Random events | **World events** hit everyone at once: Chip Export Ban, Open-Source Leak, AI Winter Scare, VC Frenzy, Congressional Hearing, Solar Flare |
 
 Each faction plays to its reputation: OpenAI *Blitzscale* (+compute, faster
 research, eroding trust), Anthropic *Constitutional* (trust floor + high-trust
@@ -48,6 +50,13 @@ call the regulators on whoever's winning.
 - `src/render/` — Three.js world that mirrors sim state; skeletal animation, dramatic lighting, shadows, effects; auto quality scaling
 - `src/ui/` — overlay HUD, race panel, minimap, guide, menus
 - `src/input.js` / `src/audio.js` — trackpad-first controls; WebAudio SFX driven by sim events
+- `src/settings.js` — persistent settings (volumes, graphics quality, last faction) in localStorage
+
+Rendering: bloom + color-grade post pipeline (MSAA render target), shader
+sky dome at golden hour, sculpted backdrop hills outside the flat playfield,
+instanced grass, PMREM image-based lighting, contact shadows, jagged
+lightning, fireball-and-smoke explosions — with automatic quality scaling
+(or force it in ⚙ settings).
 
 All 3D models, sound effects and music are real, downloaded, CC-licensed
 assets — see [ATTRIBUTION.md](ATTRIBUTION.md).

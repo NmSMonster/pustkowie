@@ -47,6 +47,46 @@ body.targeting #gl { cursor: crosshair; }
   background: transparent; color: #cfd8ea; font-weight: 700; cursor: pointer;
 }
 #helpbtn:hover { background: rgba(120,150,210,0.25); }
+#gearbtn {
+  width: 24px; height: 24px; border-radius: 50%; border: 1px solid rgba(150,170,210,0.4);
+  background: transparent; color: #cfd8ea; cursor: pointer; font-size: 13px;
+}
+#gearbtn:hover { background: rgba(120,150,210,0.25); }
+
+/* active world event chip */
+#eventchip {
+  position: absolute; top: 58px; left: 50%; transform: translateX(-50%);
+  padding: 5px 14px; font-size: 12.5px; font-weight: 700; color: #8ab6ff;
+  border-color: rgba(138, 182, 255, 0.45);
+}
+
+/* pact offer */
+#pactoffer {
+  position: absolute; top: 100px; left: 50%; transform: translateX(-50%);
+  padding: 12px 18px; font-size: 13.5px; text-align: center; z-index: 12;
+  border-color: rgba(110, 231, 135, 0.5);
+}
+#pactoffer .actions { justify-content: center; }
+
+/* race panel diplomacy */
+.pactslot { width: 22px; text-align: center; }
+.pactbtn {
+  width: 20px; height: 20px; padding: 0; font-size: 11px; line-height: 1;
+  background: transparent; border: 1px solid rgba(130,160,220,0.35); border-radius: 5px;
+  cursor: pointer; opacity: 0.75;
+}
+.pactbtn:hover:not(:disabled) { opacity: 1; background: rgba(110,231,135,0.2); }
+.pactbtn.active { border-color: #6ee787; box-shadow: 0 0 7px rgba(110,231,135,0.7); opacity: 1; }
+.pactbtn:disabled { cursor: default; opacity: 0.45; }
+
+/* settings rows */
+.setrow { display: flex; align-items: center; gap: 14px; margin: 12px 0; text-align: left; }
+.setrow label { width: 140px; font-size: 13.5px; color: #c3cde0; }
+.setrow input[type=range] { flex: 1; accent-color: #6e9bff; }
+.setrow select {
+  flex: 1; background: #1a2236; color: #e8ecf2; border: 1px solid rgba(130,160,220,0.4);
+  border-radius: 6px; padding: 5px 8px; font-size: 13px;
+}
 
 /* ---------- race panel ---------- */
 #race { position: absolute; top: 10px; right: 12px; padding: 10px 12px; width: 228px; }
@@ -180,3 +220,9 @@ body.targeting #gl { cursor: crosshair; }
   border: 1px solid var(--c); border-radius: 7px; cursor: pointer;
 }
 .menubox .hint { margin-top: 22px; font-size: 12.5px; color: #7686a5; }
+.menubox .card { position: relative; }
+.menubox .card.last { box-shadow: 0 0 18px color-mix(in srgb, var(--c) 35%, transparent); }
+.lastbadge {
+  position: absolute; top: -9px; right: 10px; font-size: 9px; letter-spacing: 1px;
+  background: var(--c); color: #0a0d16; font-weight: 800; padding: 2px 7px; border-radius: 4px;
+}

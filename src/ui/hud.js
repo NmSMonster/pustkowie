@@ -1,6 +1,7 @@
 // Overlay HUD: resource bar, race panel, selection/actions, minimap,
 // event feed, help, menu and end screens. Reads sim; issues commands.
-import { FACTIONS, UNITS, BUILDINGS, MILESTONES, ABILITIES, MAP, TRUST } from '../sim/data.js';
+import { FACTIONS, UNITS, BUILDINGS, MILESTONES, ABILITIES, MAP, TRUST, WORLD_EVENTS, PACT } from '../sim/data.js';
+import { settings, saveSettings } from '../settings.js';
 
 const ICONS = { compute: '⚡', data: '◈', favor: '🏛', trust: '☺' };
 const fmt = (n) => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : Math.floor(n);
@@ -20,7 +21,11 @@ export function initHud(state) {
       <div class="res trust"><span class="ic">${ICONS.trust}</span><div id="trustbar"><div></div></div></div>
       <div id="clock">0:00</div>
       <button id="helpbtn" title="How to play (H)">?</button>
+      <button id="gearbtn" title="Settings">⚙</button>
     </div>
+    <div id="eventchip" class="panel" style="display:none"></div>
+    <div id="pactoffer" class="panel" style="display:none"></div>
+    <div id="settings" class="modal" style="display:none"></div>
     <div id="race" class="panel"><h4>RACE TO SUPERINTELLIGENCE</h4></div>
     <div id="minimap-wrap" class="panel"><canvas id="minimap" width="196" height="196"></canvas></div>
     <div id="feed"></div>
@@ -40,6 +45,7 @@ export function initHud(state) {
   const f0 = FACTIONS[sim().playerFaction];
   el('fbadge').innerHTML = `<span class="dot" style="background:${f0.css}"></span>${f0.name}`;
   el('helpbtn').onclick = () => api.toggleHelp();
+  el('gearbtn').onclick = () => toggleSettings();
 
   // race rows
   const raceRows = {};
@@ -47,13 +53,21 @@ export function initHud(state) {
     const d = FACTIONS[fid];
     const row = document.createElement('div');
     row.className = 'racerow';
+    const isMe = fid === sim().playerFaction;
     row.innerHTML = `
       <span class="dot" style="background:${d.css}"></span>
       <span class="rname">${d.short}</span>
       <span class="pips">${[0, 1, 2, 3, 4].map(i => `<i data-i="${i}"></i>`).join('')}</span>
-      <span class="rbar"><i></i></span>`;
+      <span class="rbar"><i></i></span>
+      <span class="pactslot">${isMe ? '' : `<button class="pactbtn" data-fid="${fid}" title="Propose non-aggression pact (${PACT.proposeCost} favor, +${PACT.income}⚡/s each while active)">🤝</button>`}</span>`;
     el('race').appendChild(row);
     raceRows[fid] = row;
+    const pb = row.querySelector('.pactbtn');
+    if (pb) pb.onclick = () => {
+      const ok = sim().cmdProposePact(fid);
+      if (ok) state.audio?.play('coin');
+      else post(`${d.short} is not interested (or you lack favor)`, '#99a3b8');
+    };
   }
 
   // ---------- selection panel ----------
@@ -217,6 +231,46 @@ export function initHud(state) {
         case 'victory':
           showEnd(e.fid);
           break;
+        case 'worldEvent': {
+          const w = WORLD_EVENTS[e.key];
+          bigAlert(`${w.icon} ${w.name}`, '#8ab6ff');
+          post(w.desc, '#8ab6ff');
+          break;
+        }
+        case 'worldEventEnd': {
+          post(`${WORLD_EVENTS[e.key].name} is over`, '#6b7893');
+          break;
+        }
+        case 'pactOffer':
+          showPactOffer(e.from);
+          state.audio?.play('coin', 0.6);
+          break;
+        case 'pactOfferExpired':
+          el('pactoffer').style.display = 'none';
+          break;
+        case 'pactFormed': {
+          const other = e.a === sim().playerFaction ? e.b : e.a;
+          const involveMe = e.a === sim().playerFaction || e.b === sim().playerFaction;
+          post(`🤝 Pact: ${FACTIONS[e.a].short} + ${FACTIONS[e.b].short}`, involveMe ? '#6ee787' : '#99a3b8');
+          if (involveMe) bigAlert(`🤝 Pact with ${FACTIONS[other].name}`, '#6ee787');
+          break;
+        }
+        case 'pactBroken': {
+          const involveMe = e.a === sim().playerFaction || e.b === sim().playerFaction;
+          if (e.betrayal) {
+            const victim = e.by === e.a ? e.b : e.a;
+            post(`🗡 ${FACTIONS[e.by].short} betrayed ${FACTIONS[victim].short}!`, '#ff6a5a');
+            if (victim === sim().playerFaction) bigAlert(`🗡 ${FACTIONS[e.by].name} BETRAYED YOU`, '#ff6a5a');
+            else if (involveMe) bigAlert('You broke the pact — trust suffers', '#ff9a4a');
+          } else if (involveMe) post('A pact has ended', '#99a3b8');
+          break;
+        }
+        case 'pactExpired':
+          if (e.a === sim().playerFaction || e.b === sim().playerFaction) post('Your pact expired', '#99a3b8');
+          break;
+        case 'pactDeclined':
+          if (e.to === sim().playerFaction) post(`${FACTIONS[e.by].short} declined your pact`, '#99a3b8');
+          break;
         case 'built':
           if (mine) post(`${BUILDINGS[e.kind].name} online`, '#9fe87a');
           break;
@@ -295,6 +349,45 @@ export function initHud(state) {
 
   function setPaused(p) { el('pauseflag').style.display = p ? 'block' : 'none'; }
 
+  // ---------- pact offer ----------
+  function showPactOffer(fromFid) {
+    const d = FACTIONS[fromFid];
+    const po = el('pactoffer');
+    po.style.display = 'block';
+    po.innerHTML = `
+      <b style="color:${d.css}">${d.name}</b> proposes a <b>non-aggression pact</b>
+      <span class="hp">(+${PACT.income}⚡/s each, ${PACT.duration}s)</span>
+      <div class="actions" style="margin-top:6px">
+        <button class="act" id="pact-yes">🤝 Accept</button>
+        <button class="act" id="pact-no">Decline</button>
+      </div>`;
+    el('pact-yes').onclick = () => { sim().respondPact(true); po.style.display = 'none'; state.audio?.play('coin'); };
+    el('pact-no').onclick = () => { sim().respondPact(false); po.style.display = 'none'; };
+  }
+
+  // ---------- settings ----------
+  function toggleSettings(force) {
+    const sEl = el('settings');
+    const show = force !== undefined ? force : sEl.style.display === 'none';
+    sEl.style.display = show ? 'flex' : 'none';
+    if (!show) return;
+    sEl.innerHTML = `
+      <div class="modalbox">
+        <h1>SETTINGS</h1>
+        <div class="setrow"><label>Master volume</label><input type="range" id="set-master" min="0" max="1" step="0.05" value="${settings.master}"></div>
+        <div class="setrow"><label>Music volume</label><input type="range" id="set-music" min="0" max="1" step="0.05" value="${settings.music}"></div>
+        <div class="setrow"><label>Graphics quality</label>
+          <select id="set-quality">
+            ${['auto', 'high', 'low'].map(q => `<option value="${q}" ${settings.quality === q ? 'selected' : ''}>${q}</option>`).join('')}
+          </select></div>
+        <p class="stats">Saved automatically. Quality changes apply to new matches instantly; in-match it adjusts on the fly.</p>
+        <button onclick="document.getElementById('settings').style.display='none'">CLOSE</button>
+      </div>`;
+    el('set-master').oninput = (e) => saveSettings({ master: +e.target.value });
+    el('set-music').oninput = (e) => saveSettings({ music: +e.target.value });
+    el('set-quality').onchange = (e) => saveSettings({ quality: e.target.value });
+  }
+
   // ---------- per-frame ----------
   let uiT = 0;
   function update(dt) {
@@ -328,6 +421,26 @@ export function initHud(state) {
       bar.style.width = (rf.researching ? rf.researchProgress * 100 : 0) + '%';
       bar.style.background = FACTIONS[fid].css;
       row.querySelector('.rbar').classList.toggle('final', rf.researching && rf.milestone === 4);
+    }
+
+    // active world event chip
+    const chip = el('eventchip');
+    if (sim().activeEvent) {
+      const w = WORLD_EVENTS[sim().activeEvent.key];
+      chip.style.display = 'block';
+      chip.textContent = `${w.icon} ${w.name} — ${Math.ceil(sim().activeEvent.t)}s`;
+    } else chip.style.display = 'none';
+
+    // pact badges + propose availability in race panel
+    for (const fid in raceRows) {
+      if (fid === sim().playerFaction) continue;
+      const pb = raceRows[fid].querySelector('.pactbtn');
+      if (!pb) continue;
+      const pact = sim().hasPact(sim().playerFaction, fid);
+      const grudge = (sim().grudges[sim().pactKey(sim().playerFaction, fid)] || 0) > 0;
+      pb.classList.toggle('active', pact);
+      pb.disabled = pact || grudge || !sim().fac(fid).alive;
+      pb.textContent = pact ? '🤝' : grudge ? '💢' : '🤝';
     }
 
     // refresh selection panel occasionally (cooldowns/progress tick)
@@ -382,6 +495,7 @@ export function initHud(state) {
 // ---------- faction select menu ----------
 export function showMenu(onPick) {
   const hud = document.getElementById('hud');
+  const last = settings.faction;
   const menu = document.createElement('div');
   menu.className = 'modal';
   menu.id = 'menu';
@@ -391,7 +505,8 @@ export function showMenu(onPick) {
       <p class="subtitle">Four labs. One finish line. Pick your allegiance in the race that decides everything.</p>
       <div class="cards">
         ${Object.values(FACTIONS).map(f => `
-          <div class="card" data-fid="${f.id}" style="--c:${f.css}">
+          <div class="card ${last === f.id ? 'last' : ''}" data-fid="${f.id}" style="--c:${f.css}">
+            ${last === f.id ? '<span class="lastbadge">LAST PLAYED</span>' : ''}
             <h2>${f.name}</h2>
             <p class="motto">“${f.motto}”</p>
             <p class="bonus"><b>${f.bonusName}</b> — ${f.bonusDesc}</p>
@@ -404,6 +519,7 @@ export function showMenu(onPick) {
   menu.querySelectorAll('.card').forEach(c => {
     c.onclick = () => {
       menu.remove();
+      saveSettings({ faction: c.dataset.fid });
       onPick(c.dataset.fid);
     };
   });

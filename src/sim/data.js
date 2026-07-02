@@ -99,7 +99,7 @@ export const BUILDINGS = {
 };
 
 export const MILESTONES = [
-  { name: 'Multimodal Foundation Model', short: 'Foundation', cost: { compute: 220, data: 160 }, time: 42,
+  { name: 'Multimodal Foundation Model', short: 'Foundation', cost: { compute: 260, data: 240 }, time: 42,
     perk: '+10% all income', desc: 'The scaling curve bends in your favor.' },
   { name: 'Advanced Reasoning', short: 'Reasoning', cost: { compute: 420, data: 300 }, time: 55,
     perk: 'Unlocks Sentinels & Synthetic Data Plant', desc: 'It thinks before it speaks.' },

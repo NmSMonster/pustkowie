@@ -6,6 +6,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { instance, tint, assets, desaturatedMap, stripBaseTile } from './assets.js';
 import { BUILDINGS, UNITS, FACTIONS, MAP } from '../sim/data.js';
@@ -20,11 +21,14 @@ const GradeShader = {
     void main(){
       vec4 t = texture2D(tDiffuse, vUv);
       vec3 c = t.rgb;
+      // filmic S-curve for punchy midtones
+      c = mix(c, c * c * (3.0 - 2.0 * c), 0.25);
+      // split tone: cool shadows / warm highlights (blockbuster grade)
+      float l = dot(c, vec3(0.299, 0.587, 0.114));
+      c *= mix(vec3(0.93, 1.0, 1.12), vec3(1.07, 1.0, 0.93), smoothstep(0.12, 0.72, l));
+      c = mix(vec3(l), c, 1.14);
       float d = distance(vUv, vec2(0.5));
       c *= 1.0 - smoothstep(0.5, 0.95, d) * 0.42;
-      float l = dot(c, vec3(0.299, 0.587, 0.114));
-      c = mix(vec3(l), c, 1.12);
-      c *= vec3(1.035, 1.0, 0.965);
       gl_FragColor = vec4(c, t.a);
     }`,
 };
@@ -55,6 +59,11 @@ export class World {
     this.views = new Map();      // entity id -> view
     this.effects = [];           // transient vfx
     this.raycaster = new THREE.Raycaster();
+    this._windTime = { value: 0 };
+    // day-night cycle (starts mid-afternoon); ?night=0..1 pins it for testing
+    this.cycleT = 40; this.cycleLen = 360; this.night = 0;
+    const qp = new URLSearchParams(location.search);
+    this._forceNight = qp.get('night') !== null ? parseFloat(qp.get('night')) : undefined;
 
     this.setupLights();
     this.setupSky();
@@ -84,7 +93,8 @@ export class World {
 
   // ---------------- environment ----------------
   setupLights() {
-    this.scene.add(new THREE.HemisphereLight(0x7c8fd4, 0x3d3a24, 1.3));
+    this.hemi = new THREE.HemisphereLight(0x7c8fd4, 0x3d3a24, 1.3);
+    this.scene.add(this.hemi);
     const sun = new THREE.DirectionalLight(0xffc896, 3.2);
     sun.position.set(55, 58, -80);
     sun.castShadow = true;
@@ -97,44 +107,99 @@ export class World {
     const rim = new THREE.DirectionalLight(0x6a8cff, 0.6);
     rim.position.set(-50, 45, 70);
     this.scene.add(rim);
+    this.rim = rim;
   }
 
   // ---------------- sky ----------------
   setupSky() {
-    const mat = new THREE.ShaderMaterial({
+    this.skyMat = new THREE.ShaderMaterial({
       side: THREE.BackSide, depthWrite: false, fog: false,
+      uniforms: { uNight: { value: 0 } },
       vertexShader: `varying vec3 vPos; void main(){ vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
       fragmentShader: `
-        varying vec3 vPos;
+        varying vec3 vPos; uniform float uNight;
         void main(){
           vec3 dir = normalize(vPos);
           float h = dir.y;
-          vec3 zenith  = vec3(0.030, 0.045, 0.115);
-          vec3 mid     = vec3(0.135, 0.120, 0.255);
-          vec3 horizon = vec3(0.92, 0.45, 0.22);
-          vec3 c = mix(mid, zenith, smoothstep(0.10, 0.55, h));
+          vec3 zenithD  = vec3(0.030, 0.045, 0.115);
+          vec3 midD     = vec3(0.135, 0.120, 0.255);
+          vec3 horizonD = vec3(0.92, 0.45, 0.22);
+          vec3 zenithN  = vec3(0.004, 0.007, 0.022);
+          vec3 midN     = vec3(0.012, 0.020, 0.052);
+          vec3 horizonN = vec3(0.045, 0.075, 0.155);
+          vec3 zenith = mix(zenithD, zenithN, uNight);
+          vec3 midc   = mix(midD, midN, uNight);
+          vec3 horizon= mix(horizonD, horizonN, uNight);
+          vec3 c = mix(midc, zenith, smoothstep(0.10, 0.55, h));
           c = mix(horizon, c, smoothstep(-0.03, 0.16, h));
           vec3 sunDir = normalize(vec3(0.5, 0.42, -0.72));
           float sunAmt = max(dot(dir, sunDir), 0.0);
-          c += vec3(1.0, 0.60, 0.28) * pow(sunAmt, 60.0) * 1.6;
-          c += vec3(0.9, 0.48, 0.24) * pow(sunAmt, 6.0) * 0.30;
+          vec3 glowC = mix(vec3(1.0, 0.60, 0.28), vec3(0.65, 0.75, 1.0), uNight);
+          c += glowC * pow(sunAmt, mix(60.0, 220.0, uNight)) * mix(1.6, 1.0, uNight);
+          c += glowC * pow(sunAmt, 6.0) * mix(0.30, 0.05, uNight);
           gl_FragColor = vec4(c, 1.0);
         }`,
     });
-    const sky = new THREE.Mesh(new THREE.SphereGeometry(340, 32, 16), mat);
+    const sky = new THREE.Mesh(new THREE.SphereGeometry(340, 32, 16), this.skyMat);
     sky.renderOrder = -10;
     this.scene.add(sky);
-    // faint stars up high
     const pos = [];
-    for (let i = 0; i < 320; i++) {
-      const a = Math.random() * Math.PI * 2, e = 0.28 + Math.random() * 1.2, r = 330;
+    for (let i = 0; i < 380; i++) {
+      const a = Math.random() * Math.PI * 2, e = 0.24 + Math.random() * 1.25, r = 330;
       pos.push(Math.cos(a) * Math.cos(e) * r, Math.sin(e) * r, Math.sin(a) * Math.cos(e) * r);
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    this.scene.add(new THREE.Points(g, new THREE.PointsMaterial({
-      color: 0xbfd0ff, size: 1.3, sizeAttenuation: false, transparent: true, opacity: 0.65, fog: false,
-    })));
+    this.starMat = new THREE.PointsMaterial({
+      color: 0xbfd0ff, size: 1.3, sizeAttenuation: false, transparent: true, opacity: 0.35, fog: false,
+    });
+    this.scene.add(new THREE.Points(g, this.starMat));
+  }
+
+  // crossfades the whole scene between golden hour and deep night
+  updateDayNight(dt) {
+    this.cycleT = (this.cycleT + dt) % this.cycleLen;
+    const ph = this.cycleT / this.cycleLen;
+    let n = THREE.MathUtils.smoothstep(ph, 0.50, 0.60) * (1 - THREE.MathUtils.smoothstep(ph, 0.84, 0.96));
+    if (this._forceNight !== undefined) n = this._forceNight;
+    this.night = n;
+    this.skyMat.uniforms.uNight.value = n;
+    this.sun.intensity = THREE.MathUtils.lerp(3.2, 0.6, n);
+    this.sun.color.lerpColors(new THREE.Color(0xffc896), new THREE.Color(0x8fa4e8), n);
+    this.hemi.intensity = THREE.MathUtils.lerp(1.3, 0.55, n);
+    this.hemi.color.lerpColors(new THREE.Color(0x7c8fd4), new THREE.Color(0x2e3a63), n);
+    this.hemi.groundColor.lerpColors(new THREE.Color(0x3d3a24), new THREE.Color(0x121420), n);
+    this.rim.intensity = THREE.MathUtils.lerp(0.6, 0.3, n);
+    this.scene.fog.color.lerpColors(new THREE.Color(0x201c38), new THREE.Color(0x070a16), n);
+    this.scene.background.copy(this.scene.fog.color);
+    this.renderer.toneMappingExposure = THREE.MathUtils.lerp(1.5, 1.34, n);
+    this.starMat.opacity = THREE.MathUtils.lerp(0.35, 1.0, n);
+    this.scene.environmentIntensity = THREE.MathUtils.lerp(0.35, 0.12, n);
+    if (this.bloom) this.bloom.strength = THREE.MathUtils.lerp(0.55, 0.85, n);
+    for (const gl of this.lampGlows || []) gl.material.opacity = n * 0.85;
+    if (this.fireflies) {
+      this.fireflies.visible = n > 0.03 && this._qLevel < 2;
+      this.fireflyMat.opacity = n * 0.9;
+    }
+  }
+
+  // gentle wind displacement for foliage/grass (instance-aware)
+  addWind(mat, amp) {
+    const self = this;
+    mat.onBeforeCompile = (sh) => {
+      sh.uniforms.uTime = self._windTime;
+      sh.vertexShader = ('uniform float uTime;\n' + sh.vertexShader).replace('#include <begin_vertex>',
+        `#include <begin_vertex>
+        {
+          vec3 wp = vec3(0.0);
+          #ifdef USE_INSTANCING
+            wp = vec3(instanceMatrix[3][0], 0.0, instanceMatrix[3][2]);
+          #endif
+          float wamp = ${amp.toFixed(3)} * max(transformed.y, 0.0);
+          transformed.x += sin(uTime * 1.7 + wp.x * 0.6 + wp.z * 0.8) * wamp;
+          transformed.z += cos(uTime * 1.3 + wp.x * 0.9) * wamp * 0.6;
+        }`);
+    };
   }
 
   noise2(x, z) {
@@ -188,8 +253,10 @@ export class World {
     }
     geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
     geo.computeVertexNormals();
+    const bump = this.bumpTexture();
     const ground = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
       map: this.groundTexture(), vertexColors: true, roughness: 0.95,
+      bumpMap: bump, bumpScale: 0.35,
     }));
     ground.receiveShadow = true;
     ground.name = 'ground';
@@ -213,6 +280,7 @@ export class World {
       const { geometry, material } = stripBaseTile(assets.models[k]);
       const mat = material.clone();
       if (mat.color) mat.color.lerp(new THREE.Color(0x27381f), 0.45); // dusk-darkened foliage
+      this.addWind(mat, 0.05);
       return { geometry, mat, spots: [] };
     });
     for (let c = 0; c < 14; c++) {
@@ -275,6 +343,171 @@ export class World {
     }
 
     this.setupRocks();
+    this.setupPaths();
+    this.setupLamps();
+    this.setupClouds();
+    this.setupFireflies();
+  }
+
+  bumpTexture() {
+    const c = document.createElement('canvas'); c.width = c.height = 512;
+    const g = c.getContext('2d');
+    g.fillStyle = '#808080'; g.fillRect(0, 0, 512, 512);
+    for (let i = 0; i < 2400; i++) {
+      const x = Math.random() * 512, y = Math.random() * 512, r = 2 + Math.random() * 9;
+      const v = 96 + Math.random() * 64 | 0;
+      g.fillStyle = `rgba(${v},${v},${v},0.5)`;
+      g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(26, 26);
+    return t;
+  }
+
+  setupPaths() {
+    // trampled dirt from each lab toward its two nearest datastream nodes
+    const geo = new THREE.CircleGeometry(1, 18).rotateX(-Math.PI / 2);
+    const mat = new THREE.MeshBasicMaterial({ map: this.aoTexture(), transparent: true, depthWrite: false, color: 0x54452f, opacity: 0.34 });
+    for (const f of Object.values(this.sim.factions)) {
+      const near = [...this.sim.nodes].sort((a, b) =>
+        Math.hypot(a.x - f.base.x, a.z - f.base.z) - Math.hypot(b.x - f.base.x, b.z - f.base.z)).slice(0, 2);
+      for (const nd of near) {
+        const ang = Math.atan2(nd.x - f.base.x, nd.z - f.base.z);
+        for (let i = 0; i < 6; i++) {
+          const t2 = 0.24 + (i / 5) * 0.58;
+          const wob = Math.sin(i * 1.7) * 1.1;
+          const m = new THREE.Mesh(geo, mat);
+          m.position.set(
+            f.base.x + (nd.x - f.base.x) * t2 + Math.cos(ang) * wob,
+            0.045,
+            f.base.z + (nd.z - f.base.z) * t2 - Math.sin(ang) * wob);
+          m.rotation.y = -ang;
+          m.scale.set(1.5 + Math.random() * 0.6, 1, 2.6 + Math.random() * 0.8);
+          this.scene.add(m);
+        }
+      }
+    }
+  }
+
+  setupLamps() {
+    this.lampGlows = [];
+    const { geometry, material } = stripBaseTile(assets.models.lamppost, 0.06);
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const S = 4.6;
+    const im = new THREE.InstancedMesh(geometry, material.clone(), 8);
+    im.castShadow = true;
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
+    let i = 0;
+    for (const f of Object.values(this.sim.factions)) {
+      for (const a of [Math.PI * 0.25, Math.PI * 1.25]) {
+        const x = f.base.x + Math.cos(a) * 9.2, z = f.base.z + Math.sin(a) * 9.2;
+        const yaw = -a; // arms run tangent to the apron ring
+        q.setFromAxisAngle(up, yaw);
+        m.compose(new THREE.Vector3(x, 0, z), q, new THREE.Vector3(S, S, S));
+        im.setMatrixAt(i++, m);
+        for (const sx of [bb.min.x * 0.92, bb.max.x * 0.92]) {
+          const gl = this.glowSprite(0xffd9a0, 3.4);
+          gl.position.set(
+            x + (Math.cos(yaw) * sx) * S,
+            bb.max.y * S * 0.94,
+            z + (-Math.sin(yaw) * sx) * S);
+          gl.material.opacity = 0;
+          this.scene.add(gl);
+          this.lampGlows.push(gl);
+        }
+      }
+    }
+    im.count = i;
+    this.scene.add(im);
+  }
+
+  cloudTexture() {
+    if (this._cloudTex) return this._cloudTex;
+    const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+    const g = c.getContext('2d');
+    for (let i = 0; i < 26; i++) {
+      const x = 40 + Math.random() * 176, y = 45 + Math.random() * 45, r = 16 + Math.random() * 26;
+      const gr = g.createRadialGradient(x, y, 2, x, y, r);
+      gr.addColorStop(0, 'rgba(255,255,255,0.34)');
+      gr.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = gr;
+      g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+    }
+    this._cloudTex = new THREE.CanvasTexture(c);
+    return this._cloudTex;
+  }
+
+  setupClouds() {
+    this.clouds = [];
+    this.cloudGroup = new THREE.Group();
+    const shGeo = new THREE.CircleGeometry(1, 20).rotateX(-Math.PI / 2);
+    for (let i = 0; i < 7; i++) {
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: this.cloudTexture(), transparent: true, opacity: 0.5, depthWrite: false, rotation: Math.random() * Math.PI,
+      }));
+      const sc = 26 + Math.random() * 22;
+      sp.scale.set(sc, sc * 0.5, 1);
+      const x = (Math.random() * 2 - 1) * 120, z = (Math.random() * 2 - 1) * 120;
+      sp.position.set(x, 46 + Math.random() * 14, z);
+      const sh = new THREE.Mesh(shGeo, new THREE.MeshBasicMaterial({
+        map: this.aoTexture(), transparent: true, depthWrite: false, color: 0x000000, opacity: 0.12,
+      }));
+      sh.scale.set(sc * 0.5, 1, sc * 0.3);
+      sh.position.set(x, 0.05, z);
+      this.cloudGroup.add(sp, sh);
+      this.clouds.push({ sp, sh, vx: 0.5 + Math.random() * 0.5, vz: (Math.random() - 0.5) * 0.25 });
+    }
+    this.scene.add(this.cloudGroup);
+  }
+
+  updateClouds(dt) {
+    if (!this.cloudGroup?.visible) return;
+    for (const c of this.clouds) {
+      c.sp.position.x += c.vx * dt; c.sp.position.z += c.vz * dt;
+      if (c.sp.position.x > 150) { c.sp.position.x = -150; c.sp.position.z = (Math.random() * 2 - 1) * 110; }
+      c.sh.position.set(c.sp.position.x * 0.92, 0.05, c.sp.position.z * 0.92);
+      c.sh.material.opacity = 0.13 * (1 - this.night * 0.7);
+      c.sp.material.opacity = THREE.MathUtils.lerp(0.5, 0.16, this.night);
+    }
+  }
+
+  setupFireflies() {
+    const N = 110;
+    this._ffBase = new Float32Array(N * 3);
+    this._ffPhase = new Float32Array(N);
+    const pos = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) {
+      this._ffBase[i * 3] = (Math.random() * 2 - 1) * (MAP.half - 4);
+      this._ffBase[i * 3 + 1] = 0.6 + Math.random() * 2.0;
+      this._ffBase[i * 3 + 2] = (Math.random() * 2 - 1) * (MAP.half - 4);
+      this._ffPhase[i] = Math.random() * 6.28;
+      pos.set(this._ffBase.subarray(i * 3, i * 3 + 3), i * 3);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    this.fireflyMat = new THREE.PointsMaterial({
+      color: 0xd9ffb0, size: 0.5, sizeAttenuation: true, transparent: true, opacity: 0,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    });
+    this.fireflies = new THREE.Points(g, this.fireflyMat);
+    this.fireflies.visible = false;
+    this.scene.add(this.fireflies);
+  }
+
+  updateFireflies() {
+    if (!this.fireflies?.visible) return;
+    const t = this._windTime.value;
+    const pos = this.fireflies.geometry.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const ph = this._ffPhase[i];
+      pos.setXYZ(i,
+        this._ffBase[i * 3] + Math.sin(t * 0.6 + ph) * 1.4,
+        this._ffBase[i * 3 + 1] + Math.sin(t * 1.1 + ph * 2.0) * 0.5,
+        this._ffBase[i * 3 + 2] + Math.cos(t * 0.5 + ph) * 1.4);
+    }
+    pos.needsUpdate = true;
   }
 
   concretePadTexture() {
@@ -411,6 +644,7 @@ export class World {
     const mat = new THREE.MeshStandardMaterial({
       map: this.grassTexture(), alphaTest: 0.45, side: THREE.DoubleSide, roughness: 1,
     });
+    this.addWind(mat, 0.16);
     const mesh = new THREE.InstancedMesh(geo, mat, N);
     mesh.castShadow = false;
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
@@ -561,6 +795,12 @@ export class World {
     plot.receiveShadow = true;
     grp.add(plot);
     grp.add(this.contactShadow(def.size * 0.8));
+    // windows-at-night glow the bloom picks up
+    const nglow = this.glowSprite(color, def.size * 2.1);
+    nglow.position.y = def.size * 0.75;
+    nglow.material.opacity = 0;
+    grp.add(nglow);
+    grp.userData.nglow = nglow;
     model.traverse(o => {
       if (o.isMesh && o.material?.emissive) {
         o.material.emissive = new THREE.Color(color);
@@ -704,6 +944,8 @@ export class World {
       // tower orb pulse
       const orb = v.grp.userData.orb;
       if (orb) orb.material.emissiveIntensity = 1.8 + Math.sin(performance.now() / 300 + b.x) * 0.7;
+      const ng = v.grp.userData.nglow;
+      if (ng) ng.material.opacity = this.night * (b.done ? 0.34 : 0.08);
       // damage flash + smolder when badly hurt
       if (b.hitT > 0) this.flashGroup(v.grp, b.hitT);
       if (b.done && b.hp / b.maxHp < 0.45 && Math.random() < dt * 2.2) {
@@ -768,10 +1010,17 @@ export class World {
       nv.coin.rotation.y += dt * (0.6 + frac);
       nv.coin.position.y = 1.6 + Math.sin(performance.now() / 700 + nv.spin) * 0.15;
       nv.coin.scale.setScalar(5 * (0.35 + 0.65 * frac));
-      nv.glow.material.opacity = 0.25 + 0.55 * frac;
+      nv.glow.material.opacity = (0.25 + 0.55 * frac) * (1 + this.night * 0.8);
       nv.grp.visible = n.amount > 0.5;
     }
 
+    this._windTime.value += dt;
+    this.updateDayNight(dt);
+    this.updateClouds(dt);
+    this.updateFireflies();
+    if (this.dof?.enabled) {
+      this.dof.uniforms.focus.value = this.camera.position.distanceTo(this.camFocus);
+    }
     this.updateEffects(dt);
     this.updateCamera();
     this.autoQuality(dt);
@@ -1092,6 +1341,9 @@ export class World {
     this.composer.addPass(new RenderPass(this.scene, this.camera));
     this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.5, 0.85);
     this.composer.addPass(this.bloom);
+    // tilt-shift depth of field: the premium diorama look
+    this.dof = new BokehPass(this.scene, this.camera, { focus: 44, aperture: 0.00011, maxblur: 0.0045 });
+    this.composer.addPass(this.dof);
     this.composer.addPass(new ShaderPass(GradeShader));
     this.composer.addPass(new OutputPass());
     this.postFX = true;
@@ -1106,7 +1358,9 @@ export class World {
       this.sun.shadow.mapSize.set(2048, 2048);
       this.sun.shadow.map?.dispose(); this.sun.shadow.map = null;
       this.postFX = true;
+      if (this.dof) this.dof.enabled = true;
       if (this.grass) this.grass.visible = true;
+      if (this.cloudGroup) this.cloudGroup.visible = true;
     } else if (n === 1) {
       this.renderer.setPixelRatio(1);
       this.renderer.shadowMap.enabled = true;
@@ -1114,12 +1368,17 @@ export class World {
       this.sun.shadow.mapSize.set(1024, 1024);
       this.sun.shadow.map?.dispose(); this.sun.shadow.map = null;
       this.postFX = true;
+      if (this.dof) this.dof.enabled = false;
       if (this.grass) this.grass.visible = true;
+      if (this.cloudGroup) this.cloudGroup.visible = true;
     } else {
       this.renderer.shadowMap.enabled = false;
       this.sun.castShadow = false;
       this.postFX = false;
+      if (this.dof) this.dof.enabled = false;
       if (this.grass) this.grass.visible = false;
+      if (this.cloudGroup) this.cloudGroup.visible = false;
+      if (this.fireflies) this.fireflies.visible = false;
     }
   }
 

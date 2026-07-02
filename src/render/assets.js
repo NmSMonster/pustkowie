@@ -57,6 +57,31 @@ export function instance(name) {
 
 // Tint helper: recolors meshes that carry the kit's neutral palette so each
 // faction's buildings and units read at a glance. Clones materials per call.
+// Desaturated copy of the Kenney palette texture: buildings colorize cleanly
+// with faction colors while keeping window/door detail. Built lazily.
+const desatCache = new WeakMap();
+export function desaturatedMap(fromTexture) {
+  if (desatCache.has(fromTexture)) return desatCache.get(fromTexture);
+  const img = fromTexture.image;
+  const c = document.createElement('canvas');
+  c.width = img.width; c.height = img.height;
+  const g = c.getContext('2d');
+  g.drawImage(img, 0, 0);
+  const d = g.getImageData(0, 0, c.width, c.height);
+  for (let i = 0; i < d.data.length; i += 4) {
+    const l = d.data[i] * 0.299 + d.data[i + 1] * 0.587 + d.data[i + 2] * 0.114;
+    const v = Math.min(255, 60 + l * 0.85); // lift shadows a touch
+    d.data[i] = d.data[i + 1] = d.data[i + 2] = v;
+  }
+  g.putImageData(d, 0, 0);
+  const out = new (fromTexture.constructor)(c);
+  out.flipY = fromTexture.flipY;
+  out.colorSpace = fromTexture.colorSpace;
+  out.needsUpdate = true;
+  desatCache.set(fromTexture, out);
+  return out;
+}
+
 export function tint(obj, hex, strength = 0.55) {
   const c = new THREE.Color(hex);
   obj.traverse(o => {

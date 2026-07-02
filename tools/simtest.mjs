@@ -17,8 +17,8 @@ for (let t = 0; t < minutes * 60 && !sim.over; t += dt) {
   sim.tick(dt);
   for (const ai of ais) ai.tick(dt);
   for (const e of sim.events) eventCounts[e.type] = (eventCounts[e.type] || 0) + 1;
-  const alerts = sim.events.filter(e => ['milestone', 'finalrun', 'eliminated', 'victory', 'raidLaunched'].includes(e.type));
-  for (const a of alerts) console.log(`[${(sim.t / 60).toFixed(1)}m]`, a.type, a.fid || '', a.milestone !== undefined ? 'M' + a.milestone : '', a.victim || '');
+  const alerts = sim.events.filter(e => ['milestone', 'finalrun', 'eliminated', 'victory', 'worldEvent', 'pactFormed', 'pactBroken'].includes(e.type));
+  for (const a of alerts) console.log(`[${(sim.t / 60).toFixed(1)}m]`, a.type, a.fid || a.key || [a.a, a.b].filter(Boolean).join('+') || '', a.milestone !== undefined ? 'M' + a.milestone : '', a.victim || '', a.betrayal ? 'BETRAYAL by ' + a.by : '');
   sim.events.length = 0;
 
   if (sim.t - lastReport >= 120) {

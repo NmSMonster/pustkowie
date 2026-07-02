@@ -1,6 +1,6 @@
 // Core simulation. Pure data + logic: no rendering, no DOM, no three.js.
 // Fixed-timestep tick; renderer/UI/audio consume `sim.events` each frame.
-import { FACTIONS, START, UNITS, BUILDINGS, MILESTONES, ABILITIES, TRUST, MAP, RESEARCHER_ASSIST, makeNodes, BASES } from './data.js';
+import { FACTIONS, START, UNITS, BUILDINGS, MILESTONES, ABILITIES, TRUST, MAP, RESEARCHER_ASSIST, WORLD_EVENTS, PACT, makeNodes, BASES } from './data.js';
 
 export function mulberry32(a) {
   return function () {
@@ -25,6 +25,14 @@ export class Sim {
     this.nodes = makeNodes().map((n, i) => ({ id: 'node' + i, ...n, max: n.amount }));
     this.factions = {};
     this.playerFaction = playerFactionId;
+    // world events
+    this.worldEventT = 130 + this.rand() * 60;
+    this.activeEvent = null;   // { key, t }
+    this.lastEventKey = null;
+    // diplomacy
+    this.pacts = {};           // 'a|b' -> { a, b, t }
+    this.grudges = {};         // 'a|b' -> cooldown before this pair can re-ally
+    this.pendingOffer = null;  // { from, t } — offer awaiting the player
 
     const ids = Object.keys(FACTIONS);
     // Player always starts bottom-left; rivals fill other corners.
@@ -218,6 +226,7 @@ export class Sim {
       f.trust = Math.max(0, f.trust - ab.trustCost);
       const victim = this.fac(target.faction);
       victim.trust = Math.min(100, victim.trust + TRUST.victimSympathy);
+      if (this.hasPact(fid, victim.id)) this.breakPact(fid, victim.id, fid, true);
       target.faction = fid;
       target.order = { type: 'move', x: f.base.x, z: f.base.z };
       f.stats.poached++;
@@ -243,10 +252,106 @@ export class Sim {
     return true;
   }
 
+  raceLeader(excludeFid = null) {
+    let best = null, bs = -1;
+    for (const f of Object.values(this.factions)) {
+      if (!f.alive || f.id === excludeFid) continue;
+      const sc = f.milestone + f.researchProgress;
+      if (sc > bs) { bs = sc; best = f; }
+    }
+    return best;
+  }
+
+  // ---------- diplomacy ----------
+  pactKey(a, b) { return [a, b].sort().join('|'); }
+  hasPact(a, b) { return !!this.pacts[this.pactKey(a, b)]; }
+  pactsOf(fid) { return Object.values(this.pacts).filter(p => p.a === fid || p.b === fid); }
+  formPact(a, b, dur = PACT.duration) {
+    if (a === b || this.hasPact(a, b) || (this.grudges[this.pactKey(a, b)] || 0) > 0) return false;
+    this.pacts[this.pactKey(a, b)] = { a, b, t: dur };
+    this.emit({ type: 'pactFormed', a, b });
+    return true;
+  }
+  breakPact(a, b, byFid = null, betrayal = false) {
+    const key = this.pactKey(a, b);
+    if (!this.pacts[key]) return;
+    delete this.pacts[key];
+    this.grudges[key] = betrayal ? 200 : 45;
+    if (betrayal && byFid) {
+      const t = this.fac(byFid);
+      t.trust = Math.max(0, t.trust - PACT.betrayTrustCost);
+    }
+    this.emit({ type: 'pactBroken', a, b, by: byFid, betrayal });
+  }
+  proposePactToPlayer(fromFid) {
+    if (this.pendingOffer || this.hasPact(fromFid, this.playerFaction)) return false;
+    this.pendingOffer = { from: fromFid, t: PACT.offerTime };
+    this.emit({ type: 'pactOffer', from: fromFid });
+    return true;
+  }
+  respondPact(accept) {
+    if (!this.pendingOffer) return;
+    const from = this.pendingOffer.from;
+    this.pendingOffer = null;
+    if (accept) this.formPact(from, this.playerFaction);
+    else this.emit({ type: 'pactDeclined', by: this.playerFaction, to: from });
+  }
+  cmdProposePact(targetFid) {
+    const me = this.fac(this.playerFaction), them = this.fac(targetFid);
+    if (!them?.alive || targetFid === this.playerFaction || this.hasPact(this.playerFaction, targetFid)) return false;
+    if ((this.grudges[this.pactKey(this.playerFaction, targetFid)] || 0) > 0) return false;
+    if (me.favor < PACT.proposeCost) return false;
+    me.favor -= PACT.proposeCost;
+    // AIs won't shelter the race leader; otherwise personality decides
+    const leader = this.raceLeader();
+    const p = them.def.ai;
+    let odds = 0.4 + p.trustCare * 0.45 - p.aggression * 0.2;
+    if (leader && leader.id === this.playerFaction) odds *= 0.3;
+    if (this.rand() < odds) { this.formPact(this.playerFaction, targetFid); return true; }
+    this.emit({ type: 'pactDeclined', by: targetFid, to: this.playerFaction });
+    return false;
+  }
+
+  // ---------- world events ----------
+  fireWorldEvent() {
+    const keys = Object.keys(WORLD_EVENTS).filter(k => k !== this.lastEventKey);
+    const key = keys[Math.floor(this.rand() * keys.length)];
+    this.lastEventKey = key;
+    const def = WORLD_EVENTS[key];
+    if (key === 'leak') for (const f of Object.values(this.factions)) { if (f.alive) f.data += 200; }
+    else if (key === 'frenzy') for (const f of Object.values(this.factions)) { if (f.alive) f.compute += 220; }
+    else if (key === 'hearing') { const l = this.raceLeader(); if (l) l.trust = Math.max(0, l.trust - 12); }
+    if (def.dur > 0) this.activeEvent = { key, t: def.dur };
+    this.emit({ type: 'worldEvent', key });
+  }
+
   // ---------- tick ----------
   tick(dt = 0.1) {
     if (this.over) return;
     this.t += dt;
+
+    // world events
+    this.worldEventT -= dt;
+    if (this.worldEventT <= 0) { this.fireWorldEvent(); this.worldEventT = 80 + this.rand() * 50; }
+    if (this.activeEvent) {
+      this.activeEvent.t -= dt;
+      if (this.activeEvent.t <= 0) { this.emit({ type: 'worldEventEnd', key: this.activeEvent.key }); this.activeEvent = null; }
+    }
+    // pacts age out; dead labs void their pacts
+    for (const key of Object.keys(this.pacts)) {
+      const p = this.pacts[key];
+      p.t -= dt;
+      if (!this.fac(p.a).alive || !this.fac(p.b).alive) { delete this.pacts[key]; continue; }
+      if (p.t <= 0) { delete this.pacts[key]; this.grudges[key] = 45; this.emit({ type: 'pactExpired', a: p.a, b: p.b }); }
+    }
+    for (const k of Object.keys(this.grudges)) {
+      this.grudges[k] -= dt;
+      if (this.grudges[k] <= 0) delete this.grudges[k];
+    }
+    if (this.pendingOffer) {
+      this.pendingOffer.t -= dt;
+      if (this.pendingOffer.t <= 0) { this.emit({ type: 'pactOfferExpired', from: this.pendingOffer.from }); this.pendingOffer = null; }
+    }
 
     for (const fid in this.factions) this.tickFaction(this.fac(fid), dt);
     for (const b of this.buildings) if (!b.dead) this.tickBuilding(b, dt);
@@ -269,6 +374,7 @@ export class Sim {
       if (inc) {
         let cm = (inc.compute || 0) * mult * (f.def.computeMult || 1);
         if (f.probedT > 0) cm *= 0.5;
+        if (this.activeEvent?.key === 'chipban') cm *= 0.6;
         f.compute += cm * dt;
         f.favor += (inc.favor || 0) * mult * dt;
         f.trust = Math.min(100, f.trust + (inc.trust || 0) * dt);
@@ -279,6 +385,9 @@ export class Sim {
         f.data += sy.dataOut * dt;
       }
     }
+
+    // shared infrastructure from pacts
+    f.compute += this.pactsOf(f.id).length * PACT.income * dt;
 
     // trust drift, floor, fines
     f.trust += (f.def.trustDrift || 0) * dt / 10;
@@ -296,6 +405,7 @@ export class Sim {
       if (f.trust > TRUST.high) rm *= TRUST.highResearchBonus;
       if (f.def.highTrustResearch && f.trust > TRUST.high) rm *= f.def.highTrustResearch;
       if (f.milestone >= 3) rm *= 1.4; // recursion perk (M4 index 3 completed)
+      if (this.activeEvent?.key === 'winter') rm *= 0.5;
       if (f.pausedT > 0) { f.pausedT -= dt; }
       else f.researchProgress += (dt / m.time) * rm;
       if (f.researchProgress >= 1) {
@@ -331,8 +441,8 @@ export class Sim {
       }
     }
 
-    // tower attack
-    if (b.done && def.attack) {
+    // tower attack (solar flare knocks towers offline)
+    if (b.done && def.attack && this.activeEvent?.key !== 'flare') {
       b.cd -= dt;
       const f = this.fac(b.faction);
       const range = def.attack.range * (f.def.towerRange || 1);
@@ -571,6 +681,9 @@ export class Sim {
   }
 
   noticeAttack(f, x, z, byFid) {
+    if (byFid && byFid !== f.id && this.hasPact(byFid, f.id)) {
+      this.breakPact(byFid, f.id, byFid, true);
+    }
     if (byFid && byFid !== f.id) {
       const aggressor = this.fac(byFid);
       if (aggressor.attackedRecentlyT <= 0) {

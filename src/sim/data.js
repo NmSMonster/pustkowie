@@ -139,6 +139,20 @@ export const TRUST = {
 
 export const RESEARCHER_ASSIST = 0.45; // extra build speed per additional builder
 
+// Global "the world reacts" events — same headlines hit every lab at once.
+export const WORLD_EVENTS = {
+  chipban: { name: 'Chip Export Ban', icon: '🚢', dur: 30, desc: 'GPU shipments seized at port — all compute income −40% for 30s.' },
+  leak:    { name: 'Open-Source Leak', icon: '📂', dur: 0,  desc: 'A frontier model leaks overnight — every lab gains +200 data.' },
+  winter:  { name: 'AI Winter Scare', icon: '❄️', dur: 30, desc: '"Is deep learning hitting a wall?" — all research 50% slower for 30s.' },
+  frenzy:  { name: 'VC Frenzy', icon: '💸', dur: 0,  desc: 'Money is free again — every lab gains +220 compute.' },
+  hearing: { name: 'Congressional Hearing', icon: '⚖️', dur: 0,  desc: 'The race leader gets grilled on live TV — leader loses 12 trust.' },
+  flare:   { name: 'Solar Flare', icon: '🌞', dur: 20, desc: 'Geomagnetic storm — all firewall towers offline for 20s.' },
+};
+
+// Non-aggression pacts: shared infra income while active; breaking one by
+// force is a betrayal the public does not forget.
+export const PACT = { duration: 100, income: 0.6, betrayTrustCost: 8, proposeCost: 30, offerTime: 25 };
+
 // Node layout: two safe nodes near each corner base + contested middle ring.
 export function makeNodes() {
   const n = [];

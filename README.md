@@ -28,6 +28,11 @@ No build step. Plain ES modules + Three.js from `lib/`.
 | Spells | **Poach Talent** (steal a rival researcher), **Regulatory Probe** (halve a rival's compute), **State Subsidy**, **PR Campaign** |
 | Diplomacy | **Non-aggression pacts** (+0.6⚡/s shared infra each) — trailing labs form coalitions against the leader, offer you deals mid-game, and **betray** partners who get too close to winning. Betrayal costs trust and earns a long grudge |
 | Random events | **World events** hit everyone at once: Chip Export Ban, Open-Source Leak, AI Winter Scare, VC Frenzy, Congressional Hearing, Solar Flare |
+| Fog of war | The map hides until scouted; discovered enemy buildings stay on the map, units vanish back into the dark. **Infiltrate** plants a 30s mole revealing a rival's base and books |
+| Unit counters | Agents (melee) beat Sentinels up close · Sentinels outrange **Interceptors** · Interceptors EMP Agents (2.2×, slow) |
+| Data sourcing | **Web Scrape** (+150 data, −10 trust) vs **Licensed Data** (+150 data, costs compute, +trust) |
+| Setup | **Difficulty** (Easy/Normal/Hard) and **three map scripts** (Classic Crossfire, Scarce Center, Data Ring) picked in the menu |
+| Meta | **8 achievements** persisted across runs, end-of-match **race chart**, defeat **replay** of the final seconds, guided **tutorial** on first launch, **Ctrl+1–9 control groups** |
 
 Each faction plays to its reputation: OpenAI *Blitzscale* (+compute, faster
 research, eroding trust), Anthropic *Constitutional* (trust floor + high-trust

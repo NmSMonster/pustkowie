@@ -42,7 +42,8 @@ export async function initAudio() {
 
   const lastPlay = {};
   let playCount = 0;
-  function play(name, vol = 1, rate = 1) {
+  const hasPanner = typeof ctx.createStereoPanner === 'function';
+  function play(name, vol = 1, rate = 1, pan = 0) {
     playCount++;
     const buf = buffers[name];
     if (!buf || ctx.state !== 'running') return;
@@ -51,7 +52,12 @@ export async function initAudio() {
     src.playbackRate.value = rate * (0.94 + Math.random() * 0.12);
     const g = ctx.createGain();
     g.gain.value = vol;
-    src.connect(g); g.connect(sfxBus);
+    src.connect(g);
+    if (hasPanner && pan) {
+      const p2 = ctx.createStereoPanner();
+      p2.pan.value = Math.max(-1, Math.min(1, pan));
+      g.connect(p2); p2.connect(sfxBus);
+    } else g.connect(sfxBus);
     src.start();
   }
 
@@ -95,19 +101,28 @@ export async function initAudio() {
     return base * Math.max(0.06, 1 - d / 95);
   }
 
+  // stereo position: project the event onto the camera's right vector
+  function dpan(e, state) {
+    const w = state?.world;
+    const x = e.x ?? e.to?.x, z = e.z ?? e.to?.z;
+    if (!w || x === undefined) return 0;
+    const sin = Math.sin(w.camYaw), cos = Math.cos(w.camYaw);
+    return Math.max(-1, Math.min(1, ((x - w.camFocus.x) * cos - (z - w.camFocus.z) * sin) / 45)) * 0.7;
+  }
+
   function applyEvents(events, state) {
     for (const e of events) {
       const mine = e.fid === state?.sim?.playerFaction;
       switch (e.type) {
-        case 'shot': throttled('shot', 0.08, () => play('blaster', dvol(e, state, 0.35))); break;
-        case 'punch': throttled('punch', 0.11, () => play('thud2', dvol(e, state, 0.8), 1.25)); break;
-        case 'zap': throttled('zap', 0.13, () => play('lazer', dvol(e, state, 0.4))); break;
-        case 'unitDied': throttled('death', 0.18, () => play('death', dvol(e, state, 0.5))); break;
+        case 'shot': throttled('shot', 0.08, () => play('blaster', dvol(e, state, 0.35), e.kind === 'emp' ? 1.5 : 1, dpan(e, state))); break;
+        case 'punch': throttled('punch', 0.11, () => play('thud2', dvol(e, state, 0.8), 1.25, dpan(e, state))); break;
+        case 'zap': throttled('zap', 0.13, () => play('lazer', dvol(e, state, 0.4), 1, dpan(e, state))); break;
+        case 'unitDied': throttled('death', 0.18, () => play('death', dvol(e, state, 0.5), 1, dpan(e, state))); break;
         case 'buildingDied':
-          play('explosion', dvol(e, state, 0.9));
+          play('explosion', dvol(e, state, 0.9), 1, dpan(e, state));
           throttled('cannon', 0.4, () => play('cannon', dvol(e, state, 0.5)));
           break;
-        case 'buildTick': throttled('build', 0.5, () => play('thud1', dvol(e, state, 0.28), 1.3)); break;
+        case 'buildTick': throttled('build', 0.5, () => play('thud1', dvol(e, state, 0.28), 1.3, dpan(e, state))); break;
         case 'built': if (mine) play('coin', 0.5); break;
         case 'trained': if (mine) play('pong', 0.5); break;
         case 'placed': if (mine) play('thud1', 0.7); break;
@@ -128,6 +143,11 @@ export async function initAudio() {
           break;
         case 'pactBroken':
           if (e.betrayal && (e.a === state?.sim?.playerFaction || e.b === state?.sim?.playerFaction)) play('death', 0.8, 0.6);
+          break;
+        case 'scrape': if (e.fid === state?.sim?.playerFaction) play('fall', 0.6, 1.2); break;
+        case 'license': if (e.fid === state?.sim?.playerFaction) play('coin', 0.6); break;
+        case 'infiltrated':
+          if (e.fid === state?.sim?.playerFaction || e.victim === state?.sim?.playerFaction) play('squit', 0.6, 1.3);
           break;
       }
     }

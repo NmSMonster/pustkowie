@@ -76,8 +76,8 @@ const GodRayShader = {
     }`,
 };
 
-const UNIT_MODEL = { researcher: 'xbot', agent: 'robot', sentinel: 'soldier' };
-const UNIT_SCALE = { researcher: 1.15, agent: 0.44, sentinel: 1.15 };
+const UNIT_MODEL = { researcher: 'xbot', agent: 'robot', sentinel: 'soldier', interceptor: 'robot' };
+const UNIT_SCALE = { researcher: 1.15, agent: 0.44, sentinel: 1.15, interceptor: 0.34 };
 
 export class World {
   constructor(sim, canvas) {
@@ -122,6 +122,11 @@ export class World {
       hdr.dispose();
     }, undefined, () => { /* keep procedural env on failure */ });
 
+    // fog of war overlay (player perspective; off in spectate or ?fog=0)
+    const qpf = new URLSearchParams(location.search);
+    this.fogEnabled = !qpf.get('spectate') && qpf.get('fog') !== '0';
+    if (this.fogEnabled) this.setupFog();
+
     this.setupComposer();
 
     // auto-quality: step down when fps stays low (helps weak GPUs)
@@ -163,10 +168,10 @@ export class World {
   setupSky() {
     this.skyMat = new THREE.ShaderMaterial({
       side: THREE.BackSide, depthWrite: false, fog: false,
-      uniforms: { uNight: { value: 0 } },
+      uniforms: { uNight: { value: 0 }, uStorm: { value: 0 } },
       vertexShader: `varying vec3 vPos; void main(){ vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
       fragmentShader: `
-        varying vec3 vPos; uniform float uNight;
+        varying vec3 vPos; uniform float uNight; uniform float uStorm;
         void main(){
           vec3 dir = normalize(vPos);
           float h = dir.y;
@@ -186,6 +191,9 @@ export class World {
           vec3 glowC = mix(vec3(1.0, 0.60, 0.28), vec3(0.65, 0.75, 1.0), uNight);
           c += glowC * pow(sunAmt, mix(60.0, 220.0, uNight)) * mix(1.6, 1.0, uNight);
           c += glowC * pow(sunAmt, 6.0) * mix(0.30, 0.05, uNight);
+          // storm front: wash the sky toward slate gray
+          float sl = dot(c, vec3(0.35));
+          c = mix(c, vec3(sl) * vec3(0.75, 0.8, 0.9), uStorm * 0.65);
           gl_FragColor = vec4(c, 1.0);
         }`,
     });
@@ -563,6 +571,7 @@ export class World {
       }
     }
     this.rainK += ((this._raining ? 1 : 0) - this.rainK) * Math.min(1, dt * 0.7);
+    if (this.skyMat) this.skyMat.uniforms.uStorm.value = this.rainK;
     const on = this.rainK > 0.02 && this._qLevel < 2;
     this.rain.visible = on;
     if (on) {
@@ -697,8 +706,9 @@ export class World {
       c.sp.position.x += c.vx * dt; c.sp.position.z += c.vz * dt;
       if (c.sp.position.x > 150) { c.sp.position.x = -150; c.sp.position.z = (Math.random() * 2 - 1) * 110; }
       c.sh.position.set(c.sp.position.x * 0.92, 0.05, c.sp.position.z * 0.92);
-      c.sh.material.opacity = 0.13 * (1 - this.night * 0.7);
-      c.sp.material.opacity = THREE.MathUtils.lerp(0.5, 0.16, this.night);
+      c.sh.material.opacity = (0.13 + this.rainK * 0.1) * (1 - this.night * 0.7);
+      c.sp.material.opacity = THREE.MathUtils.lerp(0.5, 0.16, this.night) + this.rainK * 0.25;
+      c.sp.material.color.setRGB(1 - this.rainK * 0.45, 1 - this.rainK * 0.42, 1 - this.rainK * 0.35);
     }
   }
 
@@ -1010,8 +1020,12 @@ export class World {
           if (o.material.color) o.material.color.copy(fc).lerp(new THREE.Color(0xffffff), b.kind === 'hq' ? 0.15 : 0.3);
         }
       });
-      const sc = def.size / (b.kind === 'hq' ? 1.05 : 1.0);
-      model.scale.set(sc, sc, sc);
+      let sc = def.size / (b.kind === 'hq' ? 1.05 : 1.0);
+      sc *= 0.95 + Math.random() * 0.1; // subtle per-building variance
+      model.scale.set(sc, sc * (0.97 + Math.random() * 0.08), sc);
+      model.traverse(o => {
+        if (o.isMesh && o.material?.color) o.material.color.offsetHSL((Math.random() - 0.5) * 0.03, 0, (Math.random() - 0.5) * 0.05);
+      });
     }
     grp.add(model);
     grp.userData.model = model;
@@ -1087,7 +1101,7 @@ export class World {
   unitView(u) {
     const model = UNIT_MODEL[u.kind];
     const color = FACTIONS[u.faction].color;
-    const obj = tint(instance(model), color, u.kind === 'researcher' ? 0.45 : 0.3);
+    const obj = tint(instance(model), color, u.kind === 'researcher' ? 0.45 : u.kind === 'interceptor' ? 0.2 : 0.3);
     obj.scale.setScalar(UNIT_SCALE[u.kind]);
     const grp = new THREE.Group();
     grp.add(obj);
@@ -1133,7 +1147,7 @@ export class World {
       walk: A.Walking ? 'Walking' : (A.Walk ? 'Walk' : 'walk'),
       run: A.Running ? 'Running' : (A.Run ? 'Run' : 'run'),
       work: A.agree ? 'agree' : (A.Wave ? 'Wave' : (A.Idle ? 'Idle' : 'idle')),
-      attack: A.Punch ? 'Punch' : (A.Idle ? 'Idle' : 'idle'),
+      attack: v.kind === 'interceptor' && A.Wave ? 'Wave' : (A.Punch ? 'Punch' : (A.Idle ? 'Idle' : 'idle')),
       death: A.Death ? 'Death' : null,
     };
     return map[want];
@@ -1165,7 +1179,11 @@ export class World {
         this.scene.add(v.grp);
         this.views.set(b.id, v);
       }
-      if (b.dead && !v.dead) { v.dead = true; v.deathT = 0; this.explode(b.x, b.z, BUILDINGS[b.kind].size); }
+      v.grp.visible = this.entityVisible(b, true);
+      if (b.dead && !v.dead) {
+        v.dead = true; v.deathT = 0;
+        if (v.grp.visible) this.explode(b.x, b.z, BUILDINGS[b.kind].size);
+      }
       if (v.dead) {
         v.deathT += dt;
         v.grp.scale.setScalar(Math.max(0.001, 1 - v.deathT * 1.6));
@@ -1211,6 +1229,7 @@ export class World {
       seen.add(u.id);
       let v = this.views.get(u.id);
       if (!v) { v = this.unitView(u); this.views.set(u.id, v); }
+      v.grp.visible = this.entityVisible(u, false);
       if (u.dead && !v.dead) {
         v.dead = true; v.deathT = 0;
         // ragdoll-lite: a hop, a spin and a random topple direction
@@ -1279,7 +1298,7 @@ export class World {
       nv.coin.position.y = 1.6 + Math.sin(performance.now() / 700 + nv.spin) * 0.15;
       nv.coin.scale.setScalar(5 * (0.35 + 0.65 * frac));
       nv.glow.material.opacity = (0.25 + 0.55 * frac) * (1 + this.night * 0.8);
-      nv.grp.visible = n.amount > 0.5;
+      nv.grp.visible = n.amount > 0.5 && (!this.fogEnabled || this.sim.expAt(n.x, n.z));
     }
 
     this._windTime.value += dt;
@@ -1294,6 +1313,7 @@ export class World {
     if (this.grade) this.grade.uniforms.uTime.value = (this.grade.uniforms.uTime.value + dt) % 100;
     this.updateDayNight(dt);
     this.updateWeather(dt);
+    this.updateFog(dt);
     this.updatePostFX(dt, selection);
     this.updateClouds(dt);
     this.updateFireflies();
@@ -1513,8 +1533,13 @@ export class World {
     for (const e of events) {
       switch (e.type) {
         case 'shot':
-          this.tracer2({ x: e.from.x, y: 1.35, z: e.from.z }, { x: e.to.x, y: 1.1, z: e.to.z }, 0xffc46a);
-          this.burst(e.to.x, 1.1, e.to.z, 0xffd977, 3, 3);
+          if (e.kind === 'emp') {
+            this.tracer2({ x: e.from.x, y: 1.2, z: e.from.z }, { x: e.to.x, y: 1.1, z: e.to.z }, 0x7ff2ff);
+            this.burst(e.to.x, 1.1, e.to.z, 0x9ff6ff, 4, 3);
+          } else {
+            this.tracer2({ x: e.from.x, y: 1.35, z: e.from.z }, { x: e.to.x, y: 1.1, z: e.to.z }, 0xffc46a);
+            this.burst(e.to.x, 1.1, e.to.z, 0xffd977, 3, 3);
+          }
           break;
         case 'punch':
           this.burst(e.to.x, 1.2, e.to.z, 0xffffff, 4, 3);
@@ -1634,11 +1659,14 @@ export class World {
     this.raycaster.setFromCamera({ x: nx, y: ny }, this.camera);
     const hits = this.raycaster.intersectObjects(this.scene.children, true);
     for (const h of hits) {
-      let o = h.object;
+      let o = h.object, hidden = false, eid = null;
       while (o) {
-        if (o.userData.eid) return { id: o.userData.eid, point: h.point };
+        if (o.visible === false) hidden = true;
+        if (o.userData.eid && !eid) eid = o.userData.eid;
         o = o.parent;
       }
+      if (hidden || (eid && this.fogMesh && h.object === this.fogMesh)) continue;
+      if (eid) return { id: eid, point: h.point };
       if (h.object === this.ground) return { ground: { x: h.point.x, z: h.point.z } };
     }
     return null;
@@ -1686,6 +1714,48 @@ export class World {
     this.raycaster.setFromCamera({ x: nx, y: ny }, this.camera);
     const hit = this.raycaster.intersectObject(this.ground, false)[0];
     return hit ? { x: hit.point.x, z: hit.point.z } : null;
+  }
+
+  setupFog() {
+    const n = this.sim.fogN;
+    this._fogCanvas = document.createElement('canvas');
+    this._fogCanvas.width = n; this._fogCanvas.height = n;
+    this._fogTex = new THREE.CanvasTexture(this._fogCanvas);
+    this._fogTex.magFilter = THREE.LinearFilter;
+    const mat = new THREE.MeshBasicMaterial({
+      map: this._fogTex, transparent: true, depthWrite: false, fog: false,
+    });
+    this.fogMesh = new THREE.Mesh(new THREE.PlaneGeometry(MAP.size, MAP.size).rotateX(-Math.PI / 2), mat);
+    this.fogMesh.position.y = 6.5;
+    this.fogMesh.renderOrder = 60;
+    this.fogMesh.userData.noAO = true;
+    this.scene.add(this.fogMesh);
+    this._fogRefreshT = 0;
+  }
+
+  updateFog(dt) {
+    if (!this.fogEnabled) return;
+    this._fogRefreshT -= dt;
+    if (this._fogRefreshT > 0) return;
+    this._fogRefreshT = 0.3;
+    const n = this.sim.fogN;
+    const g = this._fogCanvas.getContext('2d');
+    const img = g.createImageData(n, n);
+    for (let i = 0; i < n * n; i++) {
+      const o = i * 4;
+      if (this.sim.visible[i]) { img.data[o + 3] = 0; }
+      else if (this.sim.explored[i]) { img.data[o] = 8; img.data[o + 1] = 11; img.data[o + 2] = 20; img.data[o + 3] = 128; }
+      else { img.data[o] = 5; img.data[o + 1] = 7; img.data[o + 2] = 14; img.data[o + 3] = 236; }
+    }
+    g.putImageData(img, 0, 0);
+    this._fogTex.needsUpdate = true;
+  }
+
+  entityVisible(e, isBuilding) {
+    if (!this.fogEnabled) return true;
+    if (e.faction === this.sim.playerFaction) return true;
+    if (isBuilding) return !!e.seen;
+    return this.sim.visAt(e.x, e.z);
   }
 
   setupComposer() {

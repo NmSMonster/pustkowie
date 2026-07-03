@@ -178,15 +178,35 @@ export function initInput(state, canvas) {
       case 'KeyF':
         if (w) { const b = sim().fac(sim().playerFaction).base; w.camFocus.set(b.x, 0, b.z); }
         break;
-      case 'Digit1': { // select all military
-        const ids = sim().units.filter(u => !u.dead && u.faction === sim().playerFaction && UNITS[u.kind].dmg).map(u => u.id);
-        setSelection(ids);
-        break;
-      }
-      case 'Digit2': { // select all researchers
-        const ids = sim().units.filter(u => !u.dead && u.faction === sim().playerFaction && u.kind === 'researcher').map(u => u.id);
-        setSelection(ids);
-        break;
+    }
+    // control groups: Ctrl+1..9 assigns, 1..9 recalls (1/2 fall back to
+    // army/researchers when the group is empty)
+    const dg = e.code.match(/^Digit([1-9])$/);
+    if (dg) {
+      const n = dg[1];
+      state.groups = state.groups || {};
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const ids = [...state.selection].filter(id => {
+          const u = sim().units.find(v => v.id === id);
+          return u && u.faction === sim().playerFaction;
+        });
+        if (ids.length) {
+          state.groups[n] = ids;
+          state.hud?.post?.(`Group ${n} bound (${ids.length} units)`, '#8ab6ff');
+          state.audio?.play('click', 0.5);
+        }
+      } else {
+        const alive = (state.groups[n] || []).filter(id => {
+          const u = sim().units.find(v => v.id === id);
+          return u && !u.dead;
+        });
+        if (alive.length) { state.groups[n] = alive; setSelection(alive); state.audio?.play('click', 0.4); }
+        else if (n === '1') {
+          setSelection(sim().units.filter(u => !u.dead && u.faction === sim().playerFaction && UNITS[u.kind].dmg).map(u => u.id));
+        } else if (n === '2') {
+          setSelection(sim().units.filter(u => !u.dead && u.faction === sim().playerFaction && u.kind === 'researcher').map(u => u.id));
+        }
       }
     }
   });

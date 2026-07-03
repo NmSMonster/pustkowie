@@ -6,6 +6,10 @@ const DEFAULTS = {
   music: 0.5,      // music volume 0..1
   quality: 'auto', // 'auto' | 'high' | 'low'
   faction: null,   // last played faction id
+  difficulty: 'normal',
+  map: 'classic',
+  achievements: {},
+  tutorialDone: false,
 };
 
 function load() {

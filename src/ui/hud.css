@@ -60,6 +60,30 @@ body.targeting #gl { cursor: crosshair; }
   border-color: rgba(138, 182, 255, 0.45);
 }
 
+/* intel chip */
+#intelchip {
+  position: absolute; top: 58px; right: 12px; margin-top: 128px;
+  padding: 6px 12px; font-size: 12px; color: #d8bef2;
+  border-color: rgba(212, 138, 255, 0.45); max-width: 240px;
+}
+
+/* tutorial */
+#tutorial {
+  position: absolute; left: 12px; top: 90px; max-width: 250px;
+  padding: 10px 14px; font-size: 12.5px; line-height: 1.5;
+  border-color: rgba(110, 231, 135, 0.5);
+}
+#tutorial b { color: #6ee787; font-size: 10.5px; letter-spacing: 1px; }
+
+/* menu extras */
+.menuopts { display: flex; gap: 22px; justify-content: center; margin-bottom: 14px; }
+.menuopts label { font-size: 12.5px; color: #9fb0cc; display: flex; align-items: center; gap: 8px; }
+.menuopts select {
+  background: #1a2236; color: #e8ecf2; border: 1px solid rgba(130,160,220,0.4);
+  border-radius: 6px; padding: 4px 10px; font-size: 13px;
+}
+.achrow { font-size: 19px; letter-spacing: 6px; margin-bottom: 12px; }
+
 /* pact offer */
 #pactoffer {
   position: absolute; top: 100px; left: 50%; transform: translateX(-50%);

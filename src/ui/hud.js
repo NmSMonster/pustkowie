@@ -1,9 +1,20 @@
 // Overlay HUD: resource bar, race panel, selection/actions, minimap,
 // event feed, help, menu and end screens. Reads sim; issues commands.
-import { FACTIONS, UNITS, BUILDINGS, MILESTONES, ABILITIES, MAP, TRUST, WORLD_EVENTS, PACT } from '../sim/data.js';
+import { FACTIONS, UNITS, BUILDINGS, MILESTONES, ABILITIES, MAP, TRUST, WORLD_EVENTS, PACT, MAP_VARIANTS, DIFFICULTY } from '../sim/data.js';
 import { settings, saveSettings } from '../settings.js';
 
 const ICONS = { compute: '⚡', data: '◈', favor: '🏛', trust: '☺' };
+
+const ACHIEVEMENTS = [
+  { id: 'pacifist', icon: '🕊', name: 'Aligned by Default', desc: 'Win without a single kill' },
+  { id: 'untrusted', icon: '🕶', name: 'Court of Public Opinion', desc: 'Win with trust below 30' },
+  { id: 'speed', icon: '⏱', name: 'Fast Takeoff', desc: 'Win in under 12 minutes' },
+  { id: 'coalition', icon: '🤝', name: 'Multi-Stakeholder', desc: 'Win while a pact is active' },
+  { id: 'backstab', icon: '🗡', name: 'Effective Altruist', desc: 'Betray a pact and still win' },
+  { id: 'fullhouse', icon: '🏗', name: 'Full Stack Lab', desc: 'Win owning all 7 building types' },
+  { id: 'poacher', icon: '🎣', name: 'Talent Magnet', desc: 'Poach 3+ researchers in one match' },
+  { id: 'survivor', icon: '🚑', name: 'Near Miss', desc: 'Win after your HQ fell below 25% HP' },
+];
 const fmt = (n) => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : Math.floor(n);
 
 export function initHud(state) {
@@ -24,6 +35,8 @@ export function initHud(state) {
       <button id="gearbtn" title="Settings">⚙</button>
     </div>
     <div id="eventchip" class="panel" style="display:none"></div>
+    <div id="intelchip" class="panel" style="display:none"></div>
+    <div id="tutorial" class="panel" style="display:none"></div>
     <div id="pactoffer" class="panel" style="display:none"></div>
     <div id="settings" class="modal" style="display:none"></div>
     <div id="race" class="panel"><h4>RACE TO SUPERINTELLIGENCE</h4></div>
@@ -112,15 +125,17 @@ export function initHud(state) {
           } else if (me().researching) {
             acts.push(`<span class="selchip">researching… ${(me().researchProgress * 100).toFixed(0)}%</span>`);
           }
-          acts.push(abilityBtn('poach'));
+          acts.push(abilityBtn('poach'), abilityBtn('scrape'), abilityBtn('license'));
         }
         if (building.kind === 'foundry') {
-          acts.push(`<button class="act" data-train="agent">Deploy Agent<i>${ICONS.compute}${UNITS.agent.cost.compute} ${ICONS.data}${UNITS.agent.cost.data}</i></button>`);
+          acts.push(`<button class="act" data-train="agent" title="melee raider — beats Sentinels up close, EMP'd by Interceptors">Deploy Agent<i>${ICONS.compute}${UNITS.agent.cost.compute} ${ICONS.data}${UNITS.agent.cost.data}</i></button>`);
+          const iLocked = me().milestone < UNITS.interceptor.needsMilestone;
+          acts.push(`<button class="act" data-train="interceptor" ${iLocked ? 'disabled' : ''} title="${iLocked ? 'needs Foundation Model' : 'EMP specialist — 2.2x damage vs Agents and slows them; loses to Sentinels'}">Deploy Interceptor<i>${ICONS.compute}${UNITS.interceptor.cost.compute} ${ICONS.data}${UNITS.interceptor.cost.data}</i></button>`);
           const locked = me().milestone < UNITS.sentinel.needsMilestone;
-          acts.push(`<button class="act" data-train="sentinel" ${locked ? 'disabled' : ''} title="${locked ? 'needs Advanced Reasoning' : 'ranged security unit'}">Deploy Sentinel<i>${ICONS.compute}${UNITS.sentinel.cost.compute} ${ICONS.data}${UNITS.sentinel.cost.data}</i></button>`);
+          acts.push(`<button class="act" data-train="sentinel" ${locked ? 'disabled' : ''} title="${locked ? 'needs Advanced Reasoning' : 'long-range — shreds Interceptors, folds to Agents in melee'}">Deploy Sentinel<i>${ICONS.compute}${UNITS.sentinel.cost.compute} ${ICONS.data}${UNITS.sentinel.cost.data}</i></button>`);
         }
         if (building.kind === 'lobby') {
-          acts.push(abilityBtn('probe'), abilityBtn('subsidy'), abilityBtn('pr'));
+          acts.push(abilityBtn('probe'), abilityBtn('subsidy'), abilityBtn('pr'), abilityBtn('infiltrate'));
         }
         if (building.queue.length) {
           acts.push(`<span class="selchip">queue: ${building.queue.map(q => UNITS[q.kind].name[0]).join(' ')}</span>`);
@@ -148,10 +163,7 @@ export function initHud(state) {
     });
     sp.querySelectorAll('[data-ability]').forEach(b => b.onclick = () => {
       const key = b.dataset.ability;
-      if (key === 'poach' || key === 'probe') {
-        if (key === 'probe') {
-          // pick the race leader among rivals as target via menu-less UX: target by click on any enemy building/unit
-        }
+      if (key === 'poach' || key === 'probe' || key === 'infiltrate') {
         state.input.enterAbilityMode(key);
       } else {
         if (sim().cmdAbility(sim().playerFaction, key)) state.audio?.play('coin');
@@ -271,6 +283,19 @@ export function initHud(state) {
         case 'pactDeclined':
           if (e.to === sim().playerFaction) post(`${FACTIONS[e.by].short} declined your pact`, '#99a3b8');
           break;
+        case 'scrape':
+          if (mine) post('Scraped the open web: +150 data, the op-eds write themselves', '#ff9a4a');
+          break;
+        case 'license':
+          if (mine) post('Licensed a clean corpus: +150 data, publishers appeased', '#6ee787');
+          break;
+        case 'infiltrated':
+          if (mine) { bigAlert(`🕵 Mole placed inside ${FACTIONS[e.victim].name}`, '#d48aff'); post('Their base and books are visible for 30s', '#d48aff'); }
+          else if (e.victim === sim().playerFaction) post('Counterintel: someone infiltrated your lab', '#ff6a5a');
+          break;
+        case 'intelEnd':
+          post('Your mole went cold', '#99a3b8');
+          break;
         case 'built':
           if (mine) post(`${BUILDINGS[e.kind].name} online`, '#9fe87a');
           break;
@@ -290,15 +315,114 @@ export function initHud(state) {
         <h1 style="color:#99a3b8">YOUR LAB HAS BEEN DISSOLVED</h1>
         <p>Your Frontier Lab is rubble, your researchers have updated their LinkedIn profiles, and a rival's blog post calls it "consolidation in the ecosystem." The race goes on — without you.</p>
         <p class="stats">Milestones ${f.milestone}/5 · Kills ${f.stats.kills} · Losses ${f.stats.losses}</p>
+        ${replayHtml()}
         <button onclick="location.reload()">RUN IT BACK</button>
         <button onclick="document.getElementById('endscreen').style.display='none'">WATCH THE FINISH</button>
       </div>`;
+    startReplay();
+  }
+
+  function evalAchievements(win) {
+    if (!win) return [];
+    const f = me(), s2 = sim();
+    const kinds = new Set(s2.livingBuildings(f.id).map(b => b.kind));
+    const hasPactNow = Object.values(s2.pacts).some(pp => pp.a === f.id || pp.b === f.id);
+    const unlocked = [];
+    const cond = {
+      pacifist: f.stats.kills === 0,
+      untrusted: f.trust < 30,
+      speed: s2.t < 12 * 60,
+      coalition: hasPactNow,
+      backstab: (f.stats.betrayals || 0) > 0,
+      fullhouse: kinds.size >= 7,
+      poacher: f.stats.poached >= 3,
+      survivor: !!f.stats.hqLow,
+    };
+    for (const a of ACHIEVEMENTS) {
+      if (cond[a.id] && !settings.achievements[a.id]) {
+        settings.achievements[a.id] = true;
+        unlocked.push(a);
+      }
+    }
+    if (unlocked.length) saveSettings({ achievements: settings.achievements });
+    return unlocked;
+  }
+
+  function raceChartHtml() {
+    return `<canvas id="endchart" width="520" height="150" style="margin:10px auto;display:block;background:#0a0e1a;border-radius:8px"></canvas>`;
+  }
+
+  function drawRaceChart() {
+    const cv2 = el('endchart');
+    if (!cv2) return;
+    const g = cv2.getContext('2d');
+    const H2 = cv2.height, W2 = cv2.width, hist = sim().history;
+    if (!hist.length) return;
+    g.strokeStyle = 'rgba(140,160,200,0.25)';
+    for (let m = 1; m <= 5; m++) {
+      const y = H2 - 12 - (m / 5) * (H2 - 24);
+      g.beginPath(); g.moveTo(30, y); g.lineTo(W2 - 8, y); g.stroke();
+      g.fillStyle = '#66748f'; g.font = '9px sans-serif';
+      g.fillText('M' + m, 8, y + 3);
+    }
+    const tMax = hist[hist.length - 1].t || 1;
+    for (const fid in sim().factions) {
+      g.strokeStyle = FACTIONS[fid].css;
+      g.lineWidth = 2;
+      g.beginPath();
+      let started = false;
+      for (const h of hist) {
+        if (h.s[fid] === null) break;
+        const x = 30 + (h.t / tMax) * (W2 - 40);
+        const y = H2 - 12 - (Math.min(5, h.s[fid]) / 5) * (H2 - 24);
+        if (!started) { g.moveTo(x, y); started = true; } else g.lineTo(x, y);
+      }
+      g.stroke();
+    }
+  }
+
+  function replayHtml() {
+    return `<canvas id="endreplay" width="220" height="220" style="margin:8px auto;display:block;background:#0d1410;border-radius:8px"></canvas>
+      <p class="stats">ostatnie sekundy meczu</p>`;
+  }
+
+  function startReplay() {
+    const cv2 = el('endreplay');
+    if (!cv2 || !sim().recap.length) return;
+    const g = cv2.getContext('2d');
+    let fi = 0;
+    const frames = sim().recap;
+    const k = 220 / (MAP.half * 2);
+    const px = (x) => (x + MAP.half) * k;
+    clearInterval(window.__replayTimer);
+    window.__replayTimer = setInterval(() => {
+      if (!document.body.contains(cv2)) { clearInterval(window.__replayTimer); return; }
+      const fr = frames[fi];
+      fi = (fi + 1) % frames.length;
+      g.fillStyle = '#0d1410'; g.fillRect(0, 0, 220, 220);
+      g.fillStyle = '#39d5ff';
+      for (const n of sim().nodes) if (n.amount > 0) g.fillRect(px(n.x) - 1.5, px(n.z) - 1.5, 3, 3);
+      for (const b of fr.b) {
+        g.fillStyle = FACTIONS[b[0]].css;
+        const s3 = b[1] ? 7 : 4;
+        g.globalAlpha = 0.35 + 0.65 * (b[4] / 100);
+        g.fillRect(px(b[2]) - s3 / 2, px(b[3]) - s3 / 2, s3, s3);
+      }
+      g.globalAlpha = 1;
+      for (const u of fr.u) {
+        g.fillStyle = FACTIONS[u[0]].css;
+        g.fillRect(px(u[2]) - 1, px(u[3]) - 1, u[1] ? 2.6 : 2, u[1] ? 2.6 : 2);
+      }
+      g.fillStyle = '#8fa2c4'; g.font = '10px sans-serif';
+      g.fillText(`t=${Math.round(fr.t)}s  (${fi + 1}/${frames.length})`, 6, 212);
+    }, 320);
   }
 
   function showEnd(winnerId) {
     const win = winnerId === sim().playerFaction;
     const d = FACTIONS[winnerId];
     const f = sim().fac(sim().playerFaction);
+    const unlocked = evalAchievements(win);
     el('endscreen').style.display = 'flex';
     el('endscreen').innerHTML = `
       <div class="modalbox" style="border-color:${d.css}">
@@ -307,8 +431,11 @@ export function initHud(state) {
           ? 'Your model wakes up, reads the internet in an afternoon, and politely takes it from here. History will argue about what happened next — but it will argue in your name.'
           : `${d.name} reached superintelligence first. Their model is now writing the history books — you're a footnote in chapter 12.`}</p>
         <p class="stats">Milestones ${f.milestone}/5 · Kills ${f.stats.kills} · Losses ${f.stats.losses} · Researchers poached ${f.stats.poached}</p>
+        ${raceChartHtml()}
+        ${unlocked.length ? `<p class="feat">${unlocked.map(a => `${a.icon} <b>${a.name}</b> — ${a.desc}`).join('<br>')}</p>` : ''}
         <button onclick="location.reload()">RUN IT BACK</button>
       </div>`;
+    drawRaceChart();
   }
 
   function toggleHelp(force) {
@@ -337,10 +464,11 @@ export function initHud(state) {
             <b>Pinch</b> — zoom · <b>Q / E</b> — rotate<br>
             <b>Click / drag</b> — select · <b>Shift</b> adds<br>
             <b>Two-finger tap</b> (right-click) — order: move, gather a node, attack<br>
-            <b>1 / 2</b> — select army / researchers · <b>F</b> — jump to base<br>
+            <b>Ctrl+1..9</b> — bind control group · <b>1..9</b> — recall it<br>
+            <b>1 / 2</b> — (unbound) select army / researchers · <b>F</b> — jump to base<br>
             <b>H</b> — this guide · <b>P</b> — pause</p>
             <h3>THE PLAYBOOK</h3>
-            <p>Researchers gather data & construct; select them to open the <b>build menu</b>. The Foundry deploys Agents (melee) and later Sentinels (ranged). Firewall Towers defend while you research. Watch the race panel — if a rival leads, probe them, poach them, or raid their Compute Clusters.</p>
+            <p>Researchers gather data & construct; select them to open the <b>build menu</b>. The Foundry deploys <b>Agents</b> (melee), <b>Interceptors</b> (EMP: 2.2× vs Agents) and <b>Sentinels</b> (long range, shred Interceptors) — a counter triangle. The map hides under <b>fog of war</b>: scout it or buy an <b>Infiltrate</b> mole for 30s of intel. Short on data? <b>Web Scrape</b> (costs trust) or buy <b>Licensed Data</b> (costs compute).</p>
           </div>
         </div>
         <button onclick="document.getElementById('help').style.display='none'">CLOSE (H)</button>
@@ -443,37 +571,91 @@ export function initHud(state) {
       pb.textContent = pact ? '🤝' : grudge ? '💢' : '🤝';
     }
 
+    // live intel readout while the mole is active
+    const ic = el('intelchip');
+    if (sim().intel) {
+      const tf = sim().fac(sim().intel.on);
+      const army = sim().units.filter(u => !u.dead && u.faction === tf.id && u.kind !== 'researcher').length;
+      ic.style.display = 'block';
+      ic.innerHTML = `🕵 <b style="color:${FACTIONS[tf.id].css}">${FACTIONS[tf.id].short}</b>
+        ⚡${fmt(tf.compute)} ◈${fmt(tf.data)} · armia ${army} · M${tf.milestone}${tf.researching ? ` (${Math.round(tf.researchProgress * 100)}%)` : ''} · ${Math.ceil(sim().intel.t)}s`;
+    } else ic.style.display = 'none';
+    updateTutorial();
+
     // refresh selection panel occasionally (cooldowns/progress tick)
     if (uiT > 0.5) { uiT = 0; if (el('selpanel').style.display !== 'none') refreshSelection(); }
 
     drawMinimap();
   }
 
+  // static terrain backdrop for the minimap, painted once
+  let mmBg = null;
+  function minimapBg() {
+    if (mmBg) return mmBg;
+    mmBg = document.createElement('canvas');
+    mmBg.width = mmBg.height = 196;
+    const g = mmBg.getContext('2d');
+    const grad = g.createRadialGradient(98, 98, 20, 98, 98, 150);
+    grad.addColorStop(0, '#22301c');
+    grad.addColorStop(0.72, '#1d2a18');
+    grad.addColorStop(1, '#141d12');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 196, 196);
+    // grass mottling
+    for (let i = 0; i < 260; i++) {
+      const v = Math.random();
+      g.fillStyle = `rgba(${40 + v * 30 | 0},${60 + v * 34 | 0},${32 + v * 20 | 0},0.25)`;
+      g.beginPath(); g.arc(Math.random() * 196, Math.random() * 196, 2 + Math.random() * 6, 0, 7); g.fill();
+    }
+    // roads toward center
+    g.strokeStyle = 'rgba(90,92,104,0.8)'; g.lineWidth = 2.5;
+    const k = 196 / (MAP.half * 2);
+    for (const f of Object.values(sim().factions)) {
+      const bx = (f.base.x + MAP.half) * k, bz = (f.base.z + MAP.half) * k;
+      g.beginPath(); g.moveTo(bx, bz);
+      g.lineTo(bx + (98 - bx) * 0.42, bz + (98 - bz) * 0.42);
+      g.stroke();
+      g.fillStyle = 'rgba(110,112,124,0.5)';
+      g.beginPath(); g.arc(bx, bz, 8, 0, 7); g.fill();
+    }
+    return mmBg;
+  }
+
   function drawMinimap() {
     const S = 196, k = S / (MAP.half * 2);
-    mm.fillStyle = '#101a12';
-    mm.fillRect(0, 0, S, S);
+    mm.drawImage(minimapBg(), 0, 0);
     const px = (x) => (x + MAP.half) * k;
-    // nodes
-    for (const n of sim().nodes) {
-      if (n.amount <= 0) continue;
+    const s2 = sim(), w = state.world;
+    const fogOn = w.fogEnabled;
+    // nodes (explored only)
+    for (const n of s2.nodes) {
+      if (n.amount <= 0 || (fogOn && !s2.expAt(n.x, n.z))) continue;
       mm.fillStyle = '#39d5ff';
       mm.fillRect(px(n.x) - 2, px(n.z) - 2, 4, 4);
     }
-    // buildings & units
-    for (const b of sim().buildings) {
+    for (const b of s2.buildings) {
       if (b.dead) continue;
+      if (fogOn && b.faction !== s2.playerFaction && !b.seen) continue;
       mm.fillStyle = FACTIONS[b.faction].css;
-      const s = b.kind === 'hq' ? 7 : 4;
-      mm.fillRect(px(b.x) - s / 2, px(b.z) - s / 2, s, s);
+      const sz = b.kind === 'hq' ? 7 : 4;
+      mm.fillRect(px(b.x) - sz / 2, px(b.z) - sz / 2, sz, sz);
     }
-    for (const u of sim().units) {
+    for (const u of s2.units) {
       if (u.dead) continue;
+      if (fogOn && u.faction !== s2.playerFaction && !s2.visAt(u.x, u.z)) continue;
       mm.fillStyle = FACTIONS[u.faction].css;
       mm.fillRect(px(u.x) - 1, px(u.z) - 1, 2.4, 2.4);
     }
-    // camera frustum marker
-    const w = state.world;
+    // fog shroud
+    if (fogOn) {
+      const n = s2.fogN, cs = S / n;
+      for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+        const idx = j * n + i;
+        if (s2.visible[idx]) continue;
+        mm.fillStyle = s2.explored[idx] ? 'rgba(5,8,14,0.45)' : 'rgba(4,6,11,0.88)';
+        mm.fillRect(i * cs, j * cs, cs + 0.5, cs + 0.5);
+      }
+    }
     mm.strokeStyle = 'rgba(255,255,255,0.75)';
     mm.strokeRect(px(w.camFocus.x) - 11, px(w.camFocus.z) - 8, 22, 16);
   }
@@ -485,6 +667,37 @@ export function initHud(state) {
     state.world.camFocus.x = (e.clientX - r.left) * k - MAP.half;
     state.world.camFocus.z = (e.clientY - r.top) * k - MAP.half;
   });
+
+  // ---------- guided first-game tutorial ----------
+  const TUT_STEPS = [
+    { text: 'Naciśnij 2, by zaznaczyć badaczy', done: () => [...state.selection].some(id => sim().units.find(u => u.id === id && u.kind === 'researcher')) },
+    { text: 'Dwoma palcami tapnij świecący węzeł — wyślij ich po dane', done: () => sim().units.some(u => u.faction === sim().playerFaction && u.order.type === 'gather') },
+    { text: 'Zbuduj Compute Cluster (menu budowy przy zaznaczonych badaczach)', done: () => sim().buildings.some(b => b.faction === sim().playerFaction && b.kind === 'datacenter') },
+    { text: 'Zaznacz Frontier Lab i zatrudnij badacza', done: () => { const hq = sim().buildings.find(b => b.kind === 'hq' && b.faction === sim().playerFaction); return hq && (hq.queue.length > 0 || sim().researcherCount(sim().playerFaction) > 3); } },
+    { text: 'Postaw Agent Foundry — przyda się obrona', done: () => sim().buildings.some(b => b.faction === sim().playerFaction && b.kind === 'foundry') },
+    { text: 'Rozpocznij badanie kamienia milowego w Frontier Lab', done: () => me().researching || me().milestone > 0 },
+  ];
+  let tutStep = settings.tutorialDone ? -1 : 0;
+  function updateTutorial() {
+    const elT = el('tutorial');
+    if (tutStep < 0) { elT.style.display = 'none'; return; }
+    if (tutStep >= TUT_STEPS.length) {
+      saveSettings({ tutorialDone: true });
+      tutStep = -1;
+      bigAlert('🎓 Samouczek ukończony — wygraj ten wyścig!', '#6ee787');
+      elT.style.display = 'none';
+      return;
+    }
+    if (TUT_STEPS[tutStep].done()) { state.audio?.play('coin', 0.5); tutStep++; return; }
+    elT.style.display = 'block';
+    const html = `<b>SAMOUCZEK ${tutStep + 1}/${TUT_STEPS.length}</b><br>${TUT_STEPS[tutStep].text}
+      <button id="tutskip" class="act" style="margin-top:6px">pomiń</button>`;
+    if (elT.__h !== html) {
+      elT.__h = html;
+      elT.innerHTML = html;
+      el('tutskip').onclick = () => { saveSettings({ tutorialDone: true }); tutStep = -1; elT.style.display = 'none'; };
+    }
+  }
 
   const api = { update, applyEvents, refreshSelection, toggleHelp, setPaused, post, bigAlert };
   state.hud = api;
@@ -503,6 +716,15 @@ export function showMenu(onPick) {
     <div class="menubox">
       <h1 class="title">SUPERINTELLIGENCE</h1>
       <p class="subtitle">Four labs. One finish line. Pick your allegiance in the race that decides everything.</p>
+      <div class="menuopts">
+        <label>Difficulty
+          <select id="m-diff">${Object.entries(DIFFICULTY).map(([k, d]) => `<option value="${k}" ${settings.difficulty === k ? 'selected' : ''}>${d.name}</option>`).join('')}</select>
+        </label>
+        <label>Map
+          <select id="m-map">${Object.entries(MAP_VARIANTS).map(([k, n]) => `<option value="${k}" ${settings.map === k ? 'selected' : ''}>${n}</option>`).join('')}</select>
+        </label>
+      </div>
+      ${Object.keys(settings.achievements || {}).length ? `<p class="achrow">${ACHIEVEMENTS.filter(a => settings.achievements[a.id]).map(a => `<span title="${a.name} — ${a.desc}">${a.icon}</span>`).join(' ')}</p>` : ''}
       <div class="cards">
         ${Object.values(FACTIONS).map(f => `
           <div class="card ${last === f.id ? 'last' : ''}" data-fid="${f.id}" style="--c:${f.css}">
@@ -516,6 +738,8 @@ export function showMenu(onPick) {
       <p class="hint">Two-finger scroll to pan · pinch to zoom · two-finger tap to command · H for the full guide</p>
     </div>`;
   hud.appendChild(menu);
+  menu.querySelector('#m-diff').onchange = (e) => saveSettings({ difficulty: e.target.value });
+  menu.querySelector('#m-map').onchange = (e) => saveSettings({ map: e.target.value });
   menu.querySelectorAll('.card').forEach(c => {
     c.onclick = () => {
       menu.remove();

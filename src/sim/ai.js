@@ -6,7 +6,8 @@ export class LabAI {
   constructor(sim, fid) {
     this.sim = sim;
     this.fid = fid;
-    this.p = sim.fac(fid).def.ai;
+    const base = sim.fac(fid).def.ai;
+    this.p = { ...base, aggression: Math.max(0.05, Math.min(1, base.aggression + sim.difficulty.aggro)) };
     this.thinkT = sim.rand() * 1;
     this.raid = null; // { targetFid }
     this.raidCdT = 0;
@@ -126,7 +127,9 @@ export class LabAI {
     if (foundry) {
       const targetArmy = Math.floor(2 + mins * (0.6 + this.p.aggression * 1.4));
       if (army.length + foundry.queue.length < targetArmy) {
-        const kind = (f.milestone >= 2 && s.rand() < 0.45) ? 'sentinel' : 'agent';
+        const r = s.rand();
+        const kind = (f.milestone >= 2 && r < 0.4) ? 'sentinel'
+          : (f.milestone >= 1 && r < 0.62) ? 'interceptor' : 'agent';
         s.cmdTrain(foundry.id, kind);
       }
     }
@@ -142,7 +145,7 @@ export class LabAI {
     // raiding
     this.raidCdT = Math.max(0, this.raidCdT - 1);
     const threshold = Math.max(4, Math.round(5 + (1 - this.p.aggression) * 5));
-    if (mins < 4 || this.raidCdT > 0) return;
+    if (mins < 4 + this.sim.difficulty.raidDelay / 60 || this.raidCdT > 0) return;
     const idleArmy = army.filter(u => u.order.type === 'idle' || u.order.type === 'attackmove_hold');
     const garrison = 2; // never leave the lab empty
     if (!this.raid && idleArmy.length >= threshold + garrison) {

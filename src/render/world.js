@@ -7,6 +7,11 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
+import { GTAOPass } from 'three/addons/postprocessing/GTAOPass.js';
+import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js';
+import { AfterimagePass } from 'three/addons/postprocessing/AfterimagePass.js';
+import { Lensflare, LensflareElement } from 'three/addons/objects/Lensflare.js';
+import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { instance, tint, assets, desaturatedMap, stripBaseTile } from './assets.js';
 import { BUILDINGS, UNITS, FACTIONS, MAP } from '../sim/data.js';
@@ -14,13 +19,20 @@ import { settings, onSettingsChange } from '../settings.js';
 
 // final color grade: vignette + gentle saturation + warm cast (runs pre-tonemap)
 const GradeShader = {
-  uniforms: { tDiffuse: { value: null } },
+  uniforms: { tDiffuse: { value: null }, uTime: { value: 0 }, uCA: { value: 0.0016 }, uGrain: { value: 0.014 } },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
   fragmentShader: `
     uniform sampler2D tDiffuse; varying vec2 vUv;
+    uniform float uTime; uniform float uCA; uniform float uGrain;
     void main(){
       vec4 t = texture2D(tDiffuse, vUv);
-      vec3 c = t.rgb;
+      // chromatic aberration: grows toward frame edges
+      vec2 toC = vUv - 0.5;
+      vec2 caOff = toC * dot(toC, toC) * uCA * 8.0;
+      vec3 c = vec3(
+        texture2D(tDiffuse, vUv + caOff).r,
+        t.g,
+        texture2D(tDiffuse, vUv - caOff).b);
       // filmic S-curve for punchy midtones
       c = mix(c, c * c * (3.0 - 2.0 * c), 0.25);
       // split tone: cool shadows / warm highlights (blockbuster grade)
@@ -29,7 +41,38 @@ const GradeShader = {
       c = mix(vec3(l), c, 1.14);
       float d = distance(vUv, vec2(0.5));
       c *= 1.0 - smoothstep(0.5, 0.95, d) * 0.42;
+      // animated film grain
+      float gn = fract(sin(dot(vUv * (uTime + 1.0), vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
+      c += gn * uGrain;
       gl_FragColor = vec4(c, t.a);
+    }`,
+};
+
+// screen-space crepuscular rays scattered from the sun's screen position
+const GodRayShader = {
+  uniforms: { tDiffuse: { value: null }, uSunPos: { value: null }, uIntensity: { value: 0.3 } },
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse; uniform vec2 uSunPos; uniform float uIntensity;
+    varying vec2 vUv;
+    void main(){
+      vec4 base = texture2D(tDiffuse, vUv);
+      vec2 dir = vUv - uSunPos;
+      float dist = length(dir);
+      vec2 stepv = dir / 26.0;
+      vec3 acc = vec3(0.0);
+      vec2 p = vUv;
+      float decay = 1.0;
+      for (int i = 0; i < 26; i++) {
+        p -= stepv;
+        vec3 smp = texture2D(tDiffuse, p).rgb;
+        float lum = max(0.0, dot(smp, vec3(0.299, 0.587, 0.114)) - 0.72);
+        acc += smp * lum * decay;
+        decay *= 0.93;
+      }
+      acc /= 26.0;
+      float falloff = smoothstep(1.35, 0.0, dist);
+      gl_FragColor = vec4(base.rgb + acc * uIntensity * falloff * vec3(1.0, 0.86, 0.62), base.a);
     }`,
 };
 
@@ -70,10 +113,14 @@ export class World {
     this.setupTerrain();
     this.setupNodes();
 
-    // image-based lighting for material sheen
+    // image-based lighting for material sheen; a real sunset HDRI streams in
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
     this.scene.environmentIntensity = 0.35;
+    new RGBELoader().load('assets/textures/venice_sunset_1k.hdr', (hdr) => {
+      this.scene.environment = pmrem.fromEquirectangular(hdr).texture;
+      hdr.dispose();
+    }, undefined, () => { /* keep procedural env on failure */ });
 
     this.setupComposer();
 
@@ -88,6 +135,8 @@ export class World {
       this.renderer.setSize(window.innerWidth, window.innerHeight);
       this.composer?.setSize(window.innerWidth, window.innerHeight);
       this.bloom?.setSize(window.innerWidth, window.innerHeight);
+      this.gtao?.setSize(window.innerWidth, window.innerHeight);
+      this.outline?.setSize(window.innerWidth, window.innerHeight);
     });
   }
 
@@ -99,7 +148,7 @@ export class World {
     sun.position.set(55, 58, -80);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    const s = 95;
+    const s = 62;
     Object.assign(sun.shadow.camera, { left: -s, right: s, top: s, bottom: -s, near: 20, far: 220 });
     sun.shadow.bias = -0.0004;
     this.scene.add(sun);
@@ -177,6 +226,20 @@ export class World {
     this.scene.environmentIntensity = THREE.MathUtils.lerp(0.35, 0.12, n);
     if (this.bloom) this.bloom.strength = THREE.MathUtils.lerp(0.55, 0.85, n);
     for (const gl of this.lampGlows || []) gl.material.opacity = n * 0.85;
+    for (const wm of this.waterMats || []) wm.uniforms.uNight.value = n;
+    // aviation lights blink at night
+    const blink = Math.sin(this._windTime.value * 3.4) > 0.4 ? 2.4 : 0.25;
+    for (const tip of this.antennaTips || []) tip.material.emissiveIntensity = n > 0.15 ? blink : 0.5;
+    // morning mist right after dawn + rain closes the fog in
+    const ph2 = this.cycleT / this.cycleLen;
+    const mist = THREE.MathUtils.smoothstep(ph2, 0.94, 0.985) * (1 - THREE.MathUtils.smoothstep(ph2, 0.02, 0.10));
+    const closeK = Math.max(mist, (this.rainK || 0) * 0.7);
+    this.scene.fog.near = THREE.MathUtils.lerp(150, 62, closeK);
+    this.scene.fog.far = THREE.MathUtils.lerp(330, 190, closeK);
+    if (this.rainK > 0.02) {
+      this.hemi.intensity *= 1 - this.rainK * 0.25;
+      this.sun.intensity *= 1 - this.rainK * 0.35;
+    }
     if (this.fireflies) {
       this.fireflies.visible = n > 0.03 && this._qLevel < 2;
       this.fireflyMat.opacity = n * 0.9;
@@ -234,6 +297,7 @@ export class World {
   setupTerrain() {
     // Rolling hills as a backdrop OUTSIDE the playable square; inside stays flat
     // so gameplay/picking never fight the terrain.
+    this.ponds = [{ x: 96, z: 22, r: 17 }, { x: -92, z: -66, r: 13 }];
     const size = 470, seg = 108;
     const geo = new THREE.PlaneGeometry(size, size, seg, seg);
     geo.rotateX(-Math.PI / 2);
@@ -244,7 +308,11 @@ export class World {
       const x = posA.getX(i), z = posA.getZ(i);
       const edge = Math.max(Math.abs(x), Math.abs(z));
       const t = THREE.MathUtils.smoothstep(edge, MAP.half + 4, MAP.half + 46);
-      const hgt = t * (this.noise2(x * 0.024, z * 0.024) * 10 + this.noise2(x * 0.075, z * 0.075) * 3.2 + t * 7);
+      let hgt = t * (this.noise2(x * 0.024, z * 0.024) * 10 + this.noise2(x * 0.075, z * 0.075) * 3.2 + t * 7);
+      for (const pd of this.ponds) {
+        const d = Math.hypot(x - pd.x, z - pd.z);
+        if (d < pd.r * 1.5) hgt = THREE.MathUtils.lerp(-0.6, hgt, THREE.MathUtils.smoothstep(d, pd.r * 0.7, pd.r * 1.5));
+      }
       posA.setY(i, hgt);
       const n = this.noise2(x * 0.05 + 9, z * 0.05 - 7) + 0.5;
       const c = cLow.clone().lerp(cHigh, THREE.MathUtils.clamp(n, 0, 1));
@@ -344,9 +412,170 @@ export class World {
 
     this.setupRocks();
     this.setupPaths();
+    this.setupRoads();
     this.setupLamps();
+    this.setupWater();
+    this.setupBaseProps();
     this.setupClouds();
     this.setupFireflies();
+    this.setupRain();
+  }
+
+  setupWater() {
+    this.waterMats = [];
+    for (const pd of this.ponds) {
+      const mat = new THREE.ShaderMaterial({
+        transparent: true,
+        uniforms: { uTime: this._windTime, uNight: { value: 0 }, uR: { value: pd.r } },
+        vertexShader: `varying vec2 vP; void main(){ vP = position.xz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `
+          uniform float uTime; uniform float uNight; uniform float uR; varying vec2 vP;
+          void main(){
+            float jit = fract(sin(dot(floor(vP * 2.7), vec2(127.1, 311.7))) * 43758.5453) * 6.28;
+            float w = sin(vP.x * 3.6 + uTime * 1.4 + jit) + sin(vP.y * 4.7 - uTime * 1.0)
+                    + sin((vP.x + vP.y) * 2.3 + uTime * 0.7 + jit * 0.5) + sin((vP.x - vP.y) * 5.1 - uTime * 1.8);
+            vec3 deep = mix(vec3(0.022, 0.075, 0.105), vec3(0.006, 0.018, 0.038), uNight);
+            vec3 lit  = mix(vec3(0.95, 0.62, 0.38), vec3(0.55, 0.65, 0.95), uNight);
+            float sparkle = smoothstep(3.1, 3.85, w);
+            float ripple = smoothstep(1.2, 3.1, w) * 0.08;
+            vec3 c = deep + deep * ripple * 4.0 + lit * sparkle * 0.5;
+            float edge = length(vP) / uR;
+            float alpha = 0.9 * (1.0 - smoothstep(0.82, 1.0, edge));
+            gl_FragColor = vec4(c, alpha);
+          }`,
+      });
+      const m = new THREE.Mesh(new THREE.CircleGeometry(pd.r, 40).rotateX(-Math.PI / 2), mat);
+      m.position.set(pd.x, -0.15, pd.z);
+      this.scene.add(m);
+      this.waterMats.push(mat);
+    }
+  }
+
+  roadTexture() {
+    if (this._roadTex) return this._roadTex;
+    const c = document.createElement('canvas'); c.width = 128; c.height = 512;
+    const g = c.getContext('2d');
+    g.fillStyle = '#3c3e46'; g.fillRect(0, 0, 128, 512);
+    for (let i = 0; i < 700; i++) {
+      const v = 46 + Math.random() * 40 | 0;
+      g.fillStyle = `rgba(${v},${v},${v + 6},0.5)`;
+      g.fillRect(Math.random() * 128, Math.random() * 512, 2, 2);
+    }
+    g.fillStyle = 'rgba(220,210,160,0.75)';
+    for (let y = 10; y < 512; y += 64) g.fillRect(60, y, 8, 30);
+    g.fillStyle = 'rgba(20,20,24,0.6)';
+    g.fillRect(0, 0, 5, 512); g.fillRect(123, 0, 5, 512);
+    this._roadTex = new THREE.CanvasTexture(c);
+    this._roadTex.colorSpace = THREE.SRGBColorSpace;
+    return this._roadTex;
+  }
+
+  setupRoads() {
+    // service roads from each lab apron toward the contested center
+    for (const f of Object.values(this.sim.factions)) {
+      const ang = Math.atan2(-f.base.x, -f.base.z);
+      const len = 30;
+      const geo = new THREE.PlaneGeometry(3.4, len).rotateX(-Math.PI / 2);
+      const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+        map: this.roadTexture(), transparent: true, opacity: 0.94, roughness: 0.94, depthWrite: false,
+      }));
+      const t0 = 11 + len / 2;
+      m.position.set(f.base.x + Math.sin(ang) * t0, 0.055, f.base.z + Math.cos(ang) * t0);
+      m.rotation.y = ang;
+      m.receiveShadow = true;
+      m.renderOrder = 1;
+      this.scene.add(m);
+    }
+  }
+
+  setupBaseProps() {
+    // solar panels + blinking antenna masts around every apron
+    this.antennaTips = [];
+    const panelGeo = new THREE.BoxGeometry(2.3, 0.08, 1.5);
+    const legGeo = new THREE.BoxGeometry(0.1, 0.7, 0.1);
+    const panelMat = new THREE.MeshStandardMaterial({ color: 0x16264d, roughness: 0.25, metalness: 0.6, emissive: 0x0a1533, emissiveIntensity: 0.4 });
+    const frameMat = new THREE.MeshStandardMaterial({ color: 0x9aa4ad, roughness: 0.5, metalness: 0.7 });
+    for (const f of Object.values(this.sim.factions)) {
+      for (const a of [Math.PI * 0.75, Math.PI * 0.95]) {
+        const grp = new THREE.Group();
+        const p = new THREE.Mesh(panelGeo, panelMat);
+        p.rotation.x = -0.5; p.position.y = 0.85; p.castShadow = true;
+        const l1 = new THREE.Mesh(legGeo, frameMat); l1.position.set(-0.8, 0.35, 0);
+        const l2 = new THREE.Mesh(legGeo, frameMat); l2.position.set(0.8, 0.35, 0);
+        grp.add(p, l1, l2);
+        grp.position.set(f.base.x + Math.cos(a) * 8.6, 0, f.base.z + Math.sin(a) * 8.6);
+        grp.rotation.y = -a + Math.PI / 2;
+        this.scene.add(grp);
+      }
+      // antenna mast with aviation light
+      const mast = new THREE.Group();
+      const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.12, 6.4, 6), frameMat);
+      pole.position.y = 3.2; pole.castShadow = true;
+      const tip = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6),
+        new THREE.MeshStandardMaterial({ color: 0xff3020, emissive: 0xff2010, emissiveIntensity: 0.6 }));
+      tip.position.y = 6.5;
+      mast.add(pole, tip);
+      for (const hgt of [2.2, 4.2]) {
+        const bar = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.05, 0.05), frameMat);
+        bar.position.y = hgt;
+        mast.add(bar);
+      }
+      const aa = Math.PI * 1.6;
+      mast.position.set(f.base.x + Math.cos(aa) * 8.8, 0, f.base.z + Math.sin(aa) * 8.8);
+      this.scene.add(mast);
+      this.antennaTips.push(tip);
+    }
+  }
+
+  setupRain() {
+    const N = 650;
+    this._rainBox = { w: 90, h: 42 };
+    const pos = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) {
+      pos[i * 3] = (Math.random() - 0.5) * this._rainBox.w;
+      pos[i * 3 + 1] = Math.random() * this._rainBox.h;
+      pos[i * 3 + 2] = (Math.random() - 0.5) * this._rainBox.w;
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    this.rainMat = new THREE.PointsMaterial({
+      color: 0xa9c2dd, size: 0.14, sizeAttenuation: true, transparent: true, opacity: 0, depthWrite: false,
+    });
+    this.rain = new THREE.Points(g, this.rainMat);
+    this.rain.visible = false;
+    this.rain.userData.noAO = true;
+    this.scene.add(this.rain);
+    this.rainK = 0;            // 0..1 rain strength
+    this._weatherT = 60 + Math.random() * 60;
+    this._raining = false; this._rainLeft = 0;
+  }
+
+  updateWeather(dt) {
+    // storms roll in every couple of minutes
+    if (this._raining) {
+      this._rainLeft -= dt;
+      if (this._rainLeft <= 0) this._raining = false;
+    } else {
+      this._weatherT -= dt;
+      if (this._weatherT <= 0) {
+        this._weatherT = 70 + Math.random() * 70;
+        if (Math.random() < 0.4) { this._raining = true; this._rainLeft = 25 + Math.random() * 25; }
+      }
+    }
+    this.rainK += ((this._raining ? 1 : 0) - this.rainK) * Math.min(1, dt * 0.7);
+    const on = this.rainK > 0.02 && this._qLevel < 2;
+    this.rain.visible = on;
+    if (on) {
+      this.rainMat.opacity = this.rainK * 0.5;
+      this.rain.position.set(this.camFocus.x, 0, this.camFocus.z);
+      const pos = this.rain.geometry.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        let y = pos.getY(i) - 36 * dt;
+        if (y < 0) y = this._rainBox.h;
+        pos.setY(i, y);
+      }
+      pos.needsUpdate = true;
+    }
   }
 
   bumpTexture() {
@@ -801,6 +1030,26 @@ export class World {
     nglow.material.opacity = 0;
     grp.add(nglow);
     grp.userData.nglow = nglow;
+    // construction scaffold shown while building
+    if (b.kind !== 'hq') {
+      const sc = new THREE.Group();
+      const postMat = new THREE.MeshStandardMaterial({ color: 0x8a6a3d, roughness: 0.9 });
+      const half = def.size * 0.62, hgt = def.size * 1.05;
+      for (const [px2, pz2] of [[-half, -half], [half, -half], [-half, half], [half, half]]) {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(0.14, hgt, 0.14), postMat);
+        post.position.set(px2, hgt / 2, pz2);
+        sc.add(post);
+      }
+      for (const lv of [0.4, 0.8]) {
+        for (const [rx, rz, w2, d2] of [[0, -half, half * 2, 0.1], [0, half, half * 2, 0.1], [-half, 0, 0.1, half * 2], [half, 0, 0.1, half * 2]]) {
+          const bar = new THREE.Mesh(new THREE.BoxGeometry(Math.max(w2, 0.1), 0.09, Math.max(d2, 0.1)), postMat);
+          bar.position.set(rx, hgt * lv, rz);
+          sc.add(bar);
+        }
+      }
+      grp.add(sc);
+      grp.userData.scaffold = sc;
+    }
     model.traverse(o => {
       if (o.isMesh && o.material?.emissive) {
         o.material.emissive = new THREE.Color(color);
@@ -923,6 +1172,9 @@ export class World {
         v.grp.rotation.z = v.deathT * 0.25;
         continue;
       }
+      // scaffold visible only during construction
+      const scaf = v.grp.userData.scaffold;
+      if (scaf) scaf.visible = !b.done;
       // construction rise
       const target = b.done ? 1 : 0.15 + b.progress * 0.85;
       const model = v.grp.userData.model;
@@ -961,6 +1213,10 @@ export class World {
       if (!v) { v = this.unitView(u); this.views.set(u.id, v); }
       if (u.dead && !v.dead) {
         v.dead = true; v.deathT = 0;
+        // ragdoll-lite: a hop, a spin and a random topple direction
+        v.deathVy = 1.6 + Math.random() * 1.4;
+        v.deathSpin = (Math.random() - 0.5) * 4;
+        v.deathDir = Math.random() < 0.5 ? 1 : -1;
         const dn = this.animName(v, 'death');
         if (dn) this.playAnim(v, dn, 0.12);
         v.ring.visible = false; v.hpBar.grp.visible = false;
@@ -968,8 +1224,13 @@ export class World {
       if (v.dead) {
         v.deathT += dt;
         v.mixer.update(dt);
-        if (!v.actions.Death) { // fall for models without a death clip
-          v.grp.rotation.x = Math.min(Math.PI / 2, v.deathT * 3.2);
+        if (v.deathT < 0.8) {
+          v.deathVy -= 10 * dt;
+          v.grp.position.y = Math.max(0, v.grp.position.y + v.deathVy * dt);
+          v.grp.rotation.y += v.deathSpin * dt;
+        }
+        if (!v.actions.Death) { // topple for models without a death clip
+          v.grp.rotation.x = Math.min(Math.PI / 2, v.deathT * 3.2) * v.deathDir;
         }
         if (v.deathT > 1.6) v.grp.position.y = -(v.deathT - 1.6) * 0.8;
         continue;
@@ -984,13 +1245,20 @@ export class World {
       while (dr < -Math.PI) dr += Math.PI * 2;
       v.grp.rotation.y += dr * Math.min(1, dt * 10);
 
+      // dust kicked up while running
+      if (u.moving && this._qLevel < 2 && Math.random() < dt * 2.4) this.puffDust(u.x, u.z);
       // animation state
       let want = 'idle';
       if (u.moving) want = u.kind === 'researcher' ? 'walk' : 'run';
       else if (u.attacking) want = 'attack';
       else if (u.working) want = 'work';
       this.playAnim(v, this.animName(v, want));
-      v.mixer.update(dt);
+      // LOD: distant units animate at 1/3 rate
+      const dx2 = u.x - this.camFocus.x, dz2 = u.z - this.camFocus.z;
+      if (dx2 * dx2 + dz2 * dz2 > 4900) {
+        v.lodSkip = (v.lodSkip || 0) + 1;
+        if (v.lodSkip % 3 === 0) v.mixer.update(dt * 3);
+      } else v.mixer.update(dt);
 
       v.ring.visible = selection.has(u.id);
       if (u.hitT > 0) this.flashGroup(v.grp, u.hitT);
@@ -1015,13 +1283,25 @@ export class World {
     }
 
     this._windTime.value += dt;
+    this.poolUpdate(this.sparks, dt);
+    this.poolUpdate(this.dust, dt);
+    for (const sc of this.scorches) {
+      if (!sc.visible) continue;
+      sc.userData.t -= dt;
+      if (sc.userData.t < 10) sc.material.opacity = Math.max(0, sc.userData.t / 10);
+      if (sc.userData.t <= 0) sc.visible = false;
+    }
+    if (this.grade) this.grade.uniforms.uTime.value = (this.grade.uniforms.uTime.value + dt) % 100;
     this.updateDayNight(dt);
+    this.updateWeather(dt);
+    this.updatePostFX(dt, selection);
     this.updateClouds(dt);
     this.updateFireflies();
     if (this.dof?.enabled) {
       this.dof.uniforms.focus.value = this.camera.position.distanceTo(this.camFocus);
     }
     this.updateEffects(dt);
+    this.updateCinema(dt);
     this.updateCamera();
     this.autoQuality(dt);
   }
@@ -1103,6 +1383,10 @@ export class World {
   }
 
   explode(x, z, size = 2) {
+    this.flashLight(x, z, 0xffa53a, 10, 0.45);
+    this.addScorch(x, z, size * 2.1);
+    const shakeAmp = 0.9 * Math.max(0, 1 - Math.hypot(this.camFocus.x - x, this.camFocus.z - z) / 70);
+    if (shakeAmp > 0.05) { this.shake.t = 0.45; this.shake.amp = Math.max(this.shake.amp, shakeAmp); }
     // fireball
     const fb = new THREE.Mesh(
       new THREE.SphereGeometry(1, 14, 10),
@@ -1131,15 +1415,30 @@ export class World {
 
   burst(x, y, z, color, n = 8, speed = 5) {
     for (let i = 0; i < n; i++) {
-      const s = this.glowSprite(color, 0.5 + Math.random() * 0.6);
-      s.position.set(x, y, z);
-      const a = Math.random() * Math.PI * 2, up = 2 + Math.random() * speed;
-      this.scene.add(s);
-      this.effects.push({
-        obj: s, t: 0, life: 0.45 + Math.random() * 0.35, kind: 'spark',
-        vx: Math.cos(a) * speed * (0.4 + Math.random()), vy: up, vz: Math.sin(a) * speed * (0.4 + Math.random()),
+      const a = Math.random() * Math.PI * 2;
+      this.poolSpawn(this.sparks, {
+        x, y, z, color,
+        vx: Math.cos(a) * speed * (0.4 + Math.random()),
+        vy: 2 + Math.random() * speed,
+        vz: Math.sin(a) * speed * (0.4 + Math.random()),
+        life: 0.45 + Math.random() * 0.35,
+        size: 0.5 + Math.random() * 0.6, grav: 14,
       });
     }
+  }
+
+  puffDust(x, z) {
+    this.poolSpawn(this.dust, {
+      x: x + (Math.random() - 0.5) * 0.5, y: 0.25, z: z + (Math.random() - 0.5) * 0.5,
+      color: 0xb0a184, vx: (Math.random() - 0.5) * 0.6, vy: 0.7 + Math.random() * 0.5, vz: (Math.random() - 0.5) * 0.6,
+      life: 0.5 + Math.random() * 0.3, size: 0.5 + Math.random() * 0.4, grow: 1.6, grav: 0.4,
+    });
+  }
+
+  // double-layer tracer: hot core + colored glow
+  tracer2(from, to, color) {
+    this.tracer(from, to, 0xffffff, 0.05, 0.11);
+    this.tracer(from, to, color, 0.16, 0.14);
   }
 
   tracer(from, to, color, thick = 0.09, life = 0.13) {
@@ -1214,7 +1513,7 @@ export class World {
     for (const e of events) {
       switch (e.type) {
         case 'shot':
-          this.tracer({ x: e.from.x, y: 1.35, z: e.from.z }, { x: e.to.x, y: 1.1, z: e.to.z }, 0xfff2a8);
+          this.tracer2({ x: e.from.x, y: 1.35, z: e.from.z }, { x: e.to.x, y: 1.1, z: e.to.z }, 0xffc46a);
           this.burst(e.to.x, 1.1, e.to.z, 0xffd977, 3, 3);
           break;
         case 'punch':
@@ -1223,6 +1522,7 @@ export class World {
         case 'zap':
           this.lightning({ x: e.from.x, y: e.from.y ?? 3, z: e.from.z }, { x: e.to.x, y: 1.0, z: e.to.z }, FACTIONS[e.fid].color);
           this.burst(e.to.x, 1.0, e.to.z, FACTIONS[e.fid].color, 5, 4);
+          this.flashLight(e.to.x, e.to.z, FACTIONS[e.fid].color, 4, 0.2);
           break;
         case 'unitDied':
           this.burst(e.x, 1.0, e.z, 0xff6a5a, 8, 5);
@@ -1238,6 +1538,12 @@ export class World {
         case 'finalrun': {
           const f = this.sim.fac(e.fid);
           this.milestoneBeam(f.base.x, f.base.z, FACTIONS[e.fid].color);
+          if (e.type === 'finalrun') {
+            this.shake.t = 0.55; this.shake.amp = Math.max(this.shake.amp, 0.55);
+            this.startCinema(f.base.x, f.base.z, 3.8);
+          } else if (e.type === 'milestone' && e.fid === this.sim.playerFaction) {
+            this.startCinema(f.base.x, f.base.z, 3.0);
+          }
           break;
         }
         case 'poached': {
@@ -1258,7 +1564,48 @@ export class World {
   }
 
   // ---------------- camera ----------------
+  startCinema(x, z, dur = 3.4) {
+    if (this.cinema) return;
+    this.cinema = {
+      t: 0, dur,
+      fromF: this.camFocus.clone(), fromD: this.camDist,
+      toF: new THREE.Vector3(x, 0, z), toD: 26,
+    };
+    document.body.classList.add('cinema');
+    const cancel = () => { this.endCinema(); };
+    this._cinemaCancel = cancel;
+    window.addEventListener('pointerdown', cancel, { once: true });
+    window.addEventListener('keydown', cancel, { once: true });
+  }
+
+  endCinema() {
+    if (!this.cinema) return;
+    this.camFocus.copy(this.cinema.fromF);
+    this.camDist = this.cinema.fromD;
+    this.cinema = null;
+    document.body.classList.remove('cinema');
+  }
+
+  updateCinema(dt) {
+    const c = this.cinema;
+    if (!c) return;
+    c.t += dt;
+    if (c.t >= c.dur) { this.endCinema(); return; }
+    // ease in, hold, ease out
+    const inK = THREE.MathUtils.smoothstep(c.t, 0, 0.7);
+    const outK = 1 - THREE.MathUtils.smoothstep(c.t, c.dur - 0.8, c.dur);
+    const k = Math.min(inK, outK);
+    this.camFocus.lerpVectors(c.fromF, c.toF, k);
+    this.camDist = THREE.MathUtils.lerp(c.fromD, c.toD, k);
+  }
+
   updateCamera() {
+    // sun + tight shadow frustum follow the view for sharper shadows
+    if (this.sun) {
+      this.sun.position.set(this.camFocus.x + 55, 58, this.camFocus.z - 80);
+      if (!this.sun.target.parent) this.scene.add(this.sun.target);
+      this.sun.target.position.set(this.camFocus.x, 0, this.camFocus.z);
+    }
     const h = Math.max(0.35, Math.min(1.35, this.camPitch));
     this.camPitch = h;
     this.camDist = Math.max(14, Math.min(85, this.camDist));
@@ -1267,10 +1614,17 @@ export class World {
     this.camFocus.z = Math.max(-lim, Math.min(lim, this.camFocus.z));
     const cy = Math.sin(h) * this.camDist;
     const cr = Math.cos(h) * this.camDist;
+    let sx = 0, sy = 0, sz = 0;
+    if (this.shake.t > 0) {
+      this.shake.t -= 1 / 60;
+      const k = this.shake.amp * (this.shake.t / 0.45);
+      sx = (Math.random() - 0.5) * k; sy = (Math.random() - 0.5) * k * 0.7; sz = (Math.random() - 0.5) * k;
+      if (this.shake.t <= 0) this.shake.amp = 0;
+    }
     this.camera.position.set(
-      this.camFocus.x + Math.sin(this.camYaw) * cr,
-      cy,
-      this.camFocus.z + Math.cos(this.camYaw) * cr
+      this.camFocus.x + Math.sin(this.camYaw) * cr + sx,
+      cy + sy,
+      this.camFocus.z + Math.cos(this.camYaw) * cr + sz
     );
     this.camera.lookAt(this.camFocus.x, 0, this.camFocus.z);
   }
@@ -1339,14 +1693,201 @@ export class World {
     const rt = new THREE.WebGLRenderTarget(w, h, { samples: 4, type: THREE.HalfFloatType });
     this.composer = new EffectComposer(this.renderer, rt);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
+    // ground-truth ambient occlusion (corners, contacts, crevices)
+    const qp2 = new URLSearchParams(location.search);
+    this.gtao = new GTAOPass(this.scene, this.camera, w, h);
+    this.gtao.output = GTAOPass.OUTPUT.Default;
+    this.gtao.blendIntensity = 0.6;
+    this.gtao.updateGtaoMaterial({ radius: 0.5, distanceExponent: 1, thickness: 1, scale: 1.2, samples: 12, distanceFallOff: 1, screenSpaceRadius: false });
+    this.gtao.enabled = qp2.get('ao') !== '0';
+    {
+      // AO depth/normal override renders sprites as opaque quads -> hide FX
+      const origRender = this.gtao.render.bind(this.gtao);
+      const hidden = [];
+      this.gtao.render = (...args) => {
+        hidden.length = 0;
+        this.scene.traverse(o => {
+          if (o.visible && (o.isSprite || o.isPoints || o.material?.blending === THREE.AdditiveBlending || o.userData.noAO)) {
+            hidden.push(o); o.visible = false;
+          }
+        });
+        origRender(...args);
+        for (const o of hidden) o.visible = true;
+      };
+    }
+    this.composer.addPass(this.gtao);
+    // selection outline
+    this.outline = new OutlinePass(new THREE.Vector2(w, h), this.scene, this.camera);
+    this.outline.edgeStrength = 3.2;
+    this.outline.edgeGlow = 0.35;
+    this.outline.edgeThickness = 1.0;
+    this.outline.visibleEdgeColor.set(0xd9ffe8);
+    this.outline.hiddenEdgeColor.set(0x123018);
+    this.composer.addPass(this.outline);
     this.bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.55, 0.5, 0.85);
     this.composer.addPass(this.bloom);
     // tilt-shift depth of field: the premium diorama look
     this.dof = new BokehPass(this.scene, this.camera, { focus: 44, aperture: 0.00011, maxblur: 0.0045 });
     this.composer.addPass(this.dof);
-    this.composer.addPass(new ShaderPass(GradeShader));
+    // crepuscular light shafts from the sun
+    this.godrays = new ShaderPass(GodRayShader);
+    this.godrays.uniforms.uSunPos.value = new THREE.Vector2(0.5, 1.2);
+    this.composer.addPass(this.godrays);
+    // motion trail blur while the camera is flying
+    this.afterimage = new AfterimagePass(0);
+    this.afterimage.enabled = false;
+    this.composer.addPass(this.afterimage);
+    this.grade = new ShaderPass(GradeShader);
+    this.composer.addPass(this.grade);
     this.composer.addPass(new OutputPass());
     this.postFX = true;
+
+    // lens flare riding the sun direction
+    this.sunDirV = new THREE.Vector3(0.5, 0.42, -0.72).normalize();
+    const flare = new Lensflare();
+    flare.addElement(new LensflareElement(this.flareTexture(200, 1), 300, 0, new THREE.Color(0xffd9a8)));
+    flare.addElement(new LensflareElement(this.flareTexture(70, 0.45), 90, 0.35, new THREE.Color(0xffc890)));
+    flare.addElement(new LensflareElement(this.flareTexture(50, 0.4), 130, 0.65, new THREE.Color(0x9fc4ff)));
+    flare.addElement(new LensflareElement(this.flareTexture(40, 0.35), 60, 1.0, new THREE.Color(0xffe9c8)));
+    this.flareHost = new THREE.Object3D();
+    this.flareHost.add(flare);
+    this.scene.add(this.flareHost);
+
+    // batched particle pools: hundreds of sparks/dust in 2 draw calls
+    this.sparks = this.makePool(256, new THREE.MeshBasicMaterial({
+      map: this.glowTexture(), transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    this.dust = this.makePool(96, new THREE.MeshBasicMaterial({
+      map: this.smokeTexture(), transparent: true, depthWrite: false, opacity: 0.5,
+    }));
+    // scorch decal ring buffer
+    this.scorches = [];
+    this._scorchIdx = 0;
+    this.shake = { t: 0, amp: 0 };
+
+    // pooled point lights for explosions and zaps
+    this.plPool = Array.from({ length: 4 }, () => {
+      const l = new THREE.PointLight(0xffaa55, 0, 30, 2);
+      this.scene.add(l);
+      return { l, t: 0, life: 1, peak: 0 };
+    });
+    this._plIdx = 0;
+  }
+
+  makePool(count, material) {
+    const geo = new THREE.PlaneGeometry(1, 1);
+    const mesh = new THREE.InstancedMesh(geo, material, count);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.userData.noAO = true;
+    mesh.frustumCulled = false;
+    const slots = Array.from({ length: count }, () => ({ t: 0 }));
+    const zero = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (let i = 0; i < count; i++) mesh.setMatrixAt(i, zero);
+    mesh.setColorAt(0, new THREE.Color(1, 1, 1));
+    this.scene.add(mesh);
+    return { mesh, slots, idx: 0, zero };
+  }
+
+  poolSpawn(pool, o) {
+    const i = pool.idx++ % pool.slots.length;
+    const s = pool.slots[i];
+    Object.assign(s, {
+      t: o.life, life: o.life, x: o.x, y: o.y, z: o.z,
+      vx: o.vx || 0, vy: o.vy || 0, vz: o.vz || 0,
+      size: o.size || 0.5, grow: o.grow || 0, grav: o.grav ?? 10,
+      col: o.color || 0xffffff,
+    });
+    pool.mesh.setColorAt(i, new THREE.Color(s.col));
+  }
+
+  poolUpdate(pool, dt) {
+    const m = new THREE.Matrix4(), q = this.camera.quaternion, sc = new THREE.Vector3(), pos = new THREE.Vector3();
+    const col = new THREE.Color();
+    let any = false;
+    for (let i = 0; i < pool.slots.length; i++) {
+      const s = pool.slots[i];
+      if (s.t <= 0) continue;
+      any = true;
+      s.t -= dt;
+      if (s.t <= 0) { pool.mesh.setMatrixAt(i, pool.zero); continue; }
+      const f = s.t / s.life;
+      s.vy -= s.grav * dt;
+      s.x += s.vx * dt; s.y += s.vy * dt; s.z += s.vz * dt;
+      if (s.y < 0.08) { s.y = 0.08; s.vy = 0; }
+      const size = s.size * (1 + (1 - f) * s.grow);
+      pos.set(s.x, s.y, s.z); sc.setScalar(size);
+      m.compose(pos, q, sc);
+      pool.mesh.setMatrixAt(i, m);
+      col.set(s.col).multiplyScalar(f);
+      pool.mesh.setColorAt(i, col);
+    }
+    if (any) {
+      pool.mesh.instanceMatrix.needsUpdate = true;
+      if (pool.mesh.instanceColor) pool.mesh.instanceColor.needsUpdate = true;
+    }
+  }
+
+  scorchTexture() {
+    if (this._scorchTex) return this._scorchTex;
+    const c = document.createElement('canvas'); c.width = c.height = 256;
+    const g = c.getContext('2d');
+    for (let i = 0; i < 40; i++) {
+      const a = Math.random() * Math.PI * 2, r = Math.random() ** 0.6 * 90;
+      const x = 128 + Math.cos(a) * r, y = 128 + Math.sin(a) * r;
+      const rad = 14 + Math.random() * 34;
+      const gr = g.createRadialGradient(x, y, 1, x, y, rad);
+      gr.addColorStop(0, 'rgba(8,6,4,0.55)');
+      gr.addColorStop(1, 'rgba(8,6,4,0)');
+      g.fillStyle = gr;
+      g.beginPath(); g.arc(x, y, rad, 0, 7); g.fill();
+    }
+    this._scorchTex = new THREE.CanvasTexture(c);
+    return this._scorchTex;
+  }
+
+  addScorch(x, z, size) {
+    const MAXS = 24;
+    let sc;
+    if (this.scorches.length < MAXS) {
+      sc = new THREE.Mesh(
+        new THREE.CircleGeometry(1, 20).rotateX(-Math.PI / 2),
+        new THREE.MeshBasicMaterial({ map: this.scorchTexture(), transparent: true, depthWrite: false })
+      );
+      sc.renderOrder = 1;
+      this.scene.add(sc);
+      this.scorches.push(sc);
+    } else sc = this.scorches[this._scorchIdx++ % MAXS];
+    sc.position.set(x, 0.06, z);
+    sc.rotation.y = Math.random() * Math.PI * 2;
+    sc.scale.setScalar(size);
+    sc.userData.t = 40;
+    sc.material.opacity = 1;
+    sc.visible = true;
+  }
+
+  addShake(amp) {
+    const d = Math.hypot(this.camFocus.x, this.camFocus.z); // just guard NaN
+    this.shake.t = 0.4;
+    this.shake.amp = Math.max(this.shake.amp * (this.shake.t > 0 ? 1 : 0), amp);
+  }
+
+  flareTexture(size, alpha) {
+    const c = document.createElement('canvas'); c.width = c.height = size;
+    const g = c.getContext('2d');
+    const gr = g.createRadialGradient(size / 2, size / 2, 1, size / 2, size / 2, size / 2);
+    gr.addColorStop(0, `rgba(255,255,255,${alpha})`);
+    gr.addColorStop(0.35, `rgba(255,235,200,${alpha * 0.45})`);
+    gr.addColorStop(1, 'rgba(255,235,200,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, size, size);
+    const t = new THREE.CanvasTexture(c);
+    return t;
+  }
+
+  flashLight(x, z, color, intensity = 8, life = 0.4) {
+    const slot = this.plPool[this._plIdx++ % this.plPool.length];
+    slot.l.position.set(x, 3.2, z);
+    slot.l.color.set(color);
+    slot.t = life; slot.life = life; slot.peak = intensity;
   }
 
   setTier(n) {
@@ -1359,6 +1900,8 @@ export class World {
       this.sun.shadow.map?.dispose(); this.sun.shadow.map = null;
       this.postFX = true;
       if (this.dof) this.dof.enabled = true;
+      if (this.gtao) this.gtao.enabled = new URLSearchParams(location.search).get('ao') !== '0';
+      if (this.godrays) this.godrays.enabled = true;
       if (this.grass) this.grass.visible = true;
       if (this.cloudGroup) this.cloudGroup.visible = true;
     } else if (n === 1) {
@@ -1369,6 +1912,8 @@ export class World {
       this.sun.shadow.map?.dispose(); this.sun.shadow.map = null;
       this.postFX = true;
       if (this.dof) this.dof.enabled = false;
+      if (this.gtao) this.gtao.enabled = false;
+      if (this.godrays) this.godrays.enabled = true;
       if (this.grass) this.grass.visible = true;
       if (this.cloudGroup) this.cloudGroup.visible = true;
     } else {
@@ -1376,6 +1921,8 @@ export class World {
       this.sun.castShadow = false;
       this.postFX = false;
       if (this.dof) this.dof.enabled = false;
+      if (this.gtao) this.gtao.enabled = false;
+      if (this.godrays) this.godrays.enabled = false;
       if (this.grass) this.grass.visible = false;
       if (this.cloudGroup) this.cloudGroup.visible = false;
       if (this.fireflies) this.fireflies.visible = false;
@@ -1387,6 +1934,47 @@ export class World {
     if (maxq || settings.quality === 'high') { this._lockQ = true; this.setTier(0); return; }
     if (settings.quality === 'low') { this._lockQ = true; this.setTier(2); return; }
     this._lockQ = false;
+  }
+
+  updatePostFX(dt, selection) {
+    // sun screen position drives the god rays
+    if (this.godrays) {
+      const p = new THREE.Vector3().copy(this.camera.position).addScaledVector(this.sunDirV, 220).project(this.camera);
+      const behind = p.z > 1 || p.z < -1;
+      this.godrays.uniforms.uSunPos.value.set((p.x + 1) / 2, (p.y + 1) / 2);
+      this.godrays.uniforms.uIntensity.value = behind ? 0 : THREE.MathUtils.lerp(0.34, 0.1, this.night);
+    }
+    // lens flare rides the sun, fades out at night
+    if (this.flareHost) {
+      this.flareHost.position.copy(this.camera.position).addScaledVector(this.sunDirV, 250);
+      this.flareHost.visible = this.postFX && this.night < 0.5 && this._qLevel === 0;
+    }
+    // motion blur only while the camera is actually flying
+    if (this.afterimage) {
+      if (!this._prevCam) this._prevCam = { f: this.camFocus.clone(), d: this.camDist };
+      const speed = this._prevCam.f.distanceTo(this.camFocus) + Math.abs(this._prevCam.d - this.camDist) * 0.6;
+      this._prevCam.f.copy(this.camFocus); this._prevCam.d = this.camDist;
+      const damp = THREE.MathUtils.clamp(speed * 0.28, 0, 0.55);
+      this.afterimage.enabled = this._qLevel === 0 && damp > 0.06;
+      this.afterimage.uniforms.damp.value = damp;
+    }
+    // outline follows selection
+    if (this.outline) {
+      const objs = [];
+      for (const id of selection || []) {
+        const v = this.views.get(id);
+        if (v && !v.dead) objs.push(v.grp);
+      }
+      this.outline.selectedObjects = objs;
+      this.outline.enabled = this._qLevel < 2 && objs.length > 0;
+    }
+    // pooled dynamic lights decay
+    for (const slot of this.plPool || []) {
+      if (slot.t > 0) {
+        slot.t -= dt;
+        slot.l.intensity = Math.max(0, slot.t / slot.life) * slot.peak;
+      } else slot.l.intensity = 0;
+    }
   }
 
   autoQuality(dt) {

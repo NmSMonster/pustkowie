@@ -31,8 +31,9 @@ No build step. Plain ES modules + Three.js from `lib/`.
 | Fog of war | The map hides until scouted; discovered enemy buildings stay on the map, units vanish back into the dark. **Infiltrate** plants a 30s mole revealing a rival's base and books |
 | Unit counters | Agents (melee) beat Sentinels up close · Sentinels outrange **Interceptors** · Interceptors EMP Agents (2.2×, slow) |
 | Data sourcing | **Web Scrape** (+150 data, −10 trust) vs **Licensed Data** (+150 data, costs compute, +trust) |
-| Setup | **Difficulty** (Easy/Normal/Hard) and **three map scripts** (Classic Crossfire, Scarce Center, Data Ring) picked in the menu |
+| Setup | **Difficulty** (Easy/Normal/Hard, plus **Insane** unlocked at account level 5) and **three map scripts** (Classic Crossfire, Scarce Center, Data Ring) picked in the menu |
 | Meta | **8 achievements** persisted across runs, end-of-match **race chart**, defeat **replay** of the final seconds, guided **tutorial** on first launch, **Ctrl+1–9 control groups** |
+| Career | A persistent **lab career**: every match awards **XP** (win, milestones, kills, achievements, scaled by difficulty) toward **10 account levels** with titles from *Intern* to *Architect of Superintelligence*. Levels unlock **faction skins** (Neon, Stealth, Gilded), **Spectate mode**, and **Insane** difficulty. Per-faction **mastery stars** track wins. All stored locally |
 
 Each faction plays to its reputation: OpenAI *Blitzscale* (+compute, faster
 research, eroding trust), Anthropic *Constitutional* (trust floor + high-trust

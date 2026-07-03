@@ -7,6 +7,8 @@ import { initInput } from './input.js';
 import { initHud, showMenu } from './ui/hud.js';
 import { initAudio } from './audio.js';
 import { settings } from './settings.js';
+import { chosenSkin, SKINS, levelFromXp, meta } from './meta.js';
+import { FACTIONS } from './sim/data.js';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.getElementById('gl');
@@ -18,7 +20,17 @@ const state = {
 window.__game = state; // debug/testing hook
 
 async function startGame(factionId) {
-  state.sim = new Sim(factionId, Date.now() % 100000, { difficulty: settings.difficulty, mapVariant: settings.map });
+  // meta: apply the player's chosen (and unlocked) faction skin for this match
+  const skin = SKINS[chosenSkin(factionId)];
+  if (skin?.colors?.[factionId]) {
+    FACTIONS[factionId].color = skin.colors[factionId];
+    FACTIONS[factionId].css = '#' + skin.colors[factionId].toString(16).padStart(6, '0');
+  }
+  // Insane stays locked until account level 5
+  let difficulty = settings.difficulty;
+  if (difficulty === 'insane' && levelFromXp(meta().xp) < 5) difficulty = 'hard';
+  state.xpGranted = false;
+  state.sim = new Sim(factionId, Date.now() % 100000, { difficulty, mapVariant: settings.map });
   if (params.get('spectate')) state.sim.factions[factionId].isPlayer = false;
   state.ais = makeAIs(state.sim);
   state.world = new World(state.sim, canvas);

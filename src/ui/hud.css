@@ -75,6 +75,49 @@ body.targeting #gl { cursor: crosshair; }
 }
 #tutorial b { color: #6ee787; font-size: 10.5px; letter-spacing: 1px; }
 
+/* meta progression */
+.profile {
+  display: flex; align-items: center; gap: 14px; justify-content: center;
+  margin: 0 auto 16px; padding: 10px 18px; max-width: 560px;
+  background: rgba(12, 16, 28, 0.9); border: 1px solid rgba(130, 160, 220, 0.35);
+  border-radius: 12px;
+}
+.lvlbadge {
+  background: linear-gradient(180deg, #ffd76a, #b8912e); color: #1a1206;
+  font-weight: 900; font-size: 14px; padding: 8px 12px; border-radius: 10px;
+  letter-spacing: 0.5px; white-space: nowrap;
+}
+.ptit { flex: 1; text-align: left; }
+.ptit b { font-size: 14px; color: #e8ecf2; }
+.xpbar { height: 7px; background: #1a2236; border-radius: 4px; overflow: hidden; margin: 5px 0 3px; }
+.xpbar i { display: block; height: 100%; background: linear-gradient(90deg, #ffd76a, #ff9a3a); transition: width 0.8s; }
+.xpbar.big { height: 10px; margin: 8px 0 5px; }
+.xptxt { font-size: 11px; color: #8fa2c4; }
+.pstats { font-size: 13px; color: #9fb0cc; white-space: nowrap; }
+.specbtn {
+  background: color-mix(in srgb, #6e9bff 20%, #10141f); color: #9fc0ff;
+  border: 1px solid #4a6db8; border-radius: 8px; padding: 7px 12px;
+  font-size: 12.5px; font-weight: 700; cursor: pointer; white-space: nowrap;
+}
+.specbtn:hover { filter: brightness(1.25); }
+.speclock { font-size: 13px; opacity: 0.5; }
+.stars { color: #ffd76a; font-size: 13px; letter-spacing: 2px; margin: 2px 0 6px; }
+.swatches { display: flex; gap: 6px; margin-bottom: 8px; }
+.sw {
+  width: 18px; height: 18px; border-radius: 50%; cursor: pointer;
+  border: 2px solid rgba(255,255,255,0.25); transition: transform 0.1s;
+}
+.sw:hover { transform: scale(1.2); }
+.sw.sel { border-color: #fff; box-shadow: 0 0 8px rgba(255,255,255,0.6); }
+.sw.lock { opacity: 0.3; cursor: not-allowed; position: relative; }
+.xpres {
+  margin: 12px auto; padding: 12px 18px; max-width: 520px; text-align: left;
+  background: rgba(20, 26, 44, 0.7); border: 1px solid rgba(255, 215, 106, 0.3); border-radius: 10px;
+}
+.xprow { display: flex; justify-content: space-between; font-size: 12.5px; color: #c3cde0; gap: 12px; }
+.xprow b { color: #ffd76a; font-size: 15px; }
+.levelup { margin-top: 8px; font-size: 13px; color: #6ee787; line-height: 1.6; }
+
 /* menu extras */
 .menuopts { display: flex; gap: 22px; justify-content: center; margin-bottom: 14px; }
 .menuopts label { font-size: 12.5px; color: #9fb0cc; display: flex; align-items: center; gap: 8px; }

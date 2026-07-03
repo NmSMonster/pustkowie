@@ -2,6 +2,7 @@
 // event feed, help, menu and end screens. Reads sim; issues commands.
 import { FACTIONS, UNITS, BUILDINGS, MILESTONES, ABILITIES, MAP, TRUST, WORLD_EVENTS, PACT, MAP_VARIANTS, DIFFICULTY } from '../sim/data.js';
 import { settings, saveSettings } from '../settings.js';
+import { meta, levelProgress, levelFromXp, TITLES, SKINS, UNLOCKS, MASTERY_WINS, masteryStars, skinUnlocked, chosenSkin, grantMatchXp } from '../meta.js';
 
 const ICONS = { compute: '⚡', data: '◈', favor: '🏛', trust: '☺' };
 
@@ -309,17 +310,37 @@ export function initHud(state) {
   // ---------- end / help / pause ----------
   function showKnockout() {
     const f = sim().fac(sim().playerFaction);
+    const xpRes = grantOnce(0);
     el('endscreen').style.display = 'flex';
     el('endscreen').innerHTML = `
       <div class="modalbox" style="border-color:#99a3b8">
         <h1 style="color:#99a3b8">YOUR LAB HAS BEEN DISSOLVED</h1>
         <p>Your Frontier Lab is rubble, your researchers have updated their LinkedIn profiles, and a rival's blog post calls it "consolidation in the ecosystem." The race goes on — without you.</p>
         <p class="stats">Milestones ${f.milestone}/5 · Kills ${f.stats.kills} · Losses ${f.stats.losses}</p>
+        ${xpBlockHtml(xpRes)}
         ${replayHtml()}
         <button onclick="location.reload()">RUN IT BACK</button>
         <button onclick="document.getElementById('endscreen').style.display='none'">WATCH THE FINISH</button>
       </div>`;
     startReplay();
+  }
+
+  function grantOnce(unlockedCount) {
+    if (state.xpGranted) return null;
+    state.xpGranted = true;
+    return grantMatchXp(sim(), sim().playerFaction, unlockedCount);
+  }
+
+  function xpBlockHtml(r) {
+    if (!r) return '';
+    const p = levelProgress(r.total);
+    return `
+      <div class="xpres">
+        <div class="xprow"><b>+${r.xp} XP</b> <span>${r.parts.map(([n, v]) => v === null ? n : `${n} +${v}`).join(' · ')}</span></div>
+        <div class="xpbar big"><i style="width:${(p.frac * 100).toFixed(1)}%"></i></div>
+        <div class="xprow"><span>LVL ${p.lvl} — ${TITLES[p.lvl - 1]}</span><span>${p.lvl >= TITLES.length ? 'MAX' : `${p.cur}/${p.need} XP`}</span></div>
+        ${r.after > r.before ? `<p class="levelup">⬆ AWANS: <b>LVL ${r.after} — ${TITLES[r.after - 1]}</b>${r.newUnlocks.map(u => `<br>${u.icon} odblokowano: <b>${u.name}</b> — ${u.desc}`).join('')}</p>` : ''}
+      </div>`;
   }
 
   function evalAchievements(win) {
@@ -423,6 +444,7 @@ export function initHud(state) {
     const d = FACTIONS[winnerId];
     const f = sim().fac(sim().playerFaction);
     const unlocked = evalAchievements(win);
+    const xpRes = grantOnce(unlocked.length);
     el('endscreen').style.display = 'flex';
     el('endscreen').innerHTML = `
       <div class="modalbox" style="border-color:${d.css}">
@@ -432,6 +454,7 @@ export function initHud(state) {
           : `${d.name} reached superintelligence first. Their model is now writing the history books — you're a footnote in chapter 12.`}</p>
         <p class="stats">Milestones ${f.milestone}/5 · Kills ${f.stats.kills} · Losses ${f.stats.losses} · Researchers poached ${f.stats.poached}</p>
         ${raceChartHtml()}
+        ${xpBlockHtml(xpRes)}
         ${unlocked.length ? `<p class="feat">${unlocked.map(a => `${a.icon} <b>${a.name}</b> — ${a.desc}`).join('<br>')}</p>` : ''}
         <button onclick="location.reload()">RUN IT BACK</button>
       </div>`;
@@ -709,6 +732,9 @@ export function initHud(state) {
 export function showMenu(onPick) {
   const hud = document.getElementById('hud');
   const last = settings.faction;
+  const m = meta();
+  const prog = levelProgress(m.xp);
+  const lvl = prog.lvl;
   const menu = document.createElement('div');
   menu.className = 'modal';
   menu.id = 'menu';
@@ -716,9 +742,22 @@ export function showMenu(onPick) {
     <div class="menubox">
       <h1 class="title">SUPERINTELLIGENCE</h1>
       <p class="subtitle">Four labs. One finish line. Pick your allegiance in the race that decides everything.</p>
+      <div class="profile">
+        <span class="lvlbadge">LVL ${lvl}</span>
+        <div class="ptit">
+          <b>${TITLES[lvl - 1]}</b>
+          <div class="xpbar"><i style="width:${(prog.frac * 100).toFixed(1)}%"></i></div>
+          <span class="xptxt">${lvl >= TITLES.length ? 'MAX LEVEL' : `${prog.cur}/${prog.need} XP`}</span>
+        </div>
+        <span class="pstats">${m.wins}W · ${m.matches - m.wins}L</span>
+        ${lvl >= 3 ? '<button id="m-spec" class="specbtn" title="Watch four AIs race">📺 Spectate</button>' : '<span class="speclock" title="Unlocks at level 3">📺 🔒</span>'}
+      </div>
       <div class="menuopts">
         <label>Difficulty
-          <select id="m-diff">${Object.entries(DIFFICULTY).map(([k, d]) => `<option value="${k}" ${settings.difficulty === k ? 'selected' : ''}>${d.name}</option>`).join('')}</select>
+          <select id="m-diff">${Object.entries(DIFFICULTY).map(([k, d]) => {
+            const locked = k === 'insane' && lvl < 5;
+            return `<option value="${k}" ${settings.difficulty === k ? 'selected' : ''} ${locked ? 'disabled' : ''}>${d.name}${locked ? ' 🔒 lvl 5' : ''}</option>`;
+          }).join('')}</select>
         </label>
         <label>Map
           <select id="m-map">${Object.entries(MAP_VARIANTS).map(([k, n]) => `<option value="${k}" ${settings.map === k ? 'selected' : ''}>${n}</option>`).join('')}</select>
@@ -730,6 +769,13 @@ export function showMenu(onPick) {
           <div class="card ${last === f.id ? 'last' : ''}" data-fid="${f.id}" style="--c:${f.css}">
             ${last === f.id ? '<span class="lastbadge">LAST PLAYED</span>' : ''}
             <h2>${f.name}</h2>
+            <p class="stars" title="Faction mastery: wins with this lab (${MASTERY_WINS.join('/')})">${'★'.repeat(masteryStars(f.id))}${'☆'.repeat(5 - masteryStars(f.id))}</p>
+            <div class="swatches">${Object.entries(SKINS).map(([id, sk]) => {
+              const col = id === 'default' ? f.css : '#' + sk.colors[f.id].toString(16).padStart(6, '0');
+              const unlocked = skinUnlocked(id);
+              const sel = chosenSkin(f.id) === id;
+              return `<span class="sw ${sel ? 'sel' : ''} ${unlocked ? '' : 'lock'}" data-skin="${id}" data-sfid="${f.id}" style="background:${col}" title="${sk.name}${unlocked ? '' : ` — unlocks at level ${sk.level}`}"></span>`;
+            }).join('')}</div>
             <p class="motto">“${f.motto}”</p>
             <p class="bonus"><b>${f.bonusName}</b> — ${f.bonusDesc}</p>
             <button>LEAD ${f.short}</button>
@@ -740,6 +786,21 @@ export function showMenu(onPick) {
   hud.appendChild(menu);
   menu.querySelector('#m-diff').onchange = (e) => saveSettings({ difficulty: e.target.value });
   menu.querySelector('#m-map').onchange = (e) => saveSettings({ map: e.target.value });
+  const spec = menu.querySelector('#m-spec');
+  if (spec) spec.onclick = (e) => { e.stopPropagation(); location.href = location.pathname + '?spectate=1&speed=2'; };
+  // skin swatches: pick a palette per faction without starting the match
+  menu.querySelectorAll('.sw').forEach(sw => {
+    sw.onclick = (e) => {
+      e.stopPropagation();
+      if (sw.classList.contains('lock')) return;
+      const fid = sw.dataset.sfid;
+      const mm = meta();
+      mm.skins[fid] = sw.dataset.skin;
+      saveSettings({ meta: mm });
+      sw.closest('.card').querySelectorAll('.sw').forEach(x => x.classList.remove('sel'));
+      sw.classList.add('sel');
+    };
+  });
   menu.querySelectorAll('.card').forEach(c => {
     c.onclick = () => {
       menu.remove();

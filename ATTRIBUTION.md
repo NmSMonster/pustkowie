@@ -19,6 +19,11 @@ All assets are real, downloaded works by human artists (none AI-generated).
 - **fps/wall-high.glb** — Kenney *Starter Kit FPS* (CC0) —
   https://github.com/KenneyNL/Starter-Kit-FPS
 
+## Textures (`assets/textures/`)
+
+- **venice_sunset_1k.hdr** — HDRI environment from the three.js examples
+  (https://github.com/mrdoob/three.js), original from Poly Haven (CC0)
+
 ## Audio (`assets/audio/`)
 
 - **sfx/** blaster, lazer, explosion, death (alien_death1), shot, squit,

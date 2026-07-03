@@ -187,6 +187,15 @@ body.targeting #gl { cursor: crosshair; }
 .modalbox.help .cols { display: flex; gap: 26px; }
 .modalbox.help .cols > div { flex: 1; }
 .modalbox.help button { display: block; margin: 8px auto 0; }
+/* letterbox bars during kill-cam */
+body.cinema #hud::before, body.cinema #hud::after {
+  content: ''; position: absolute; left: 0; right: 0; height: 9vh;
+  background: #000; z-index: 30; animation: lbin 0.5s ease-out;
+}
+body.cinema #hud::before { top: 0; }
+body.cinema #hud::after { bottom: 0; }
+@keyframes lbin { from { height: 0; } }
+
 #pauseflag {
   position: absolute; top: 46%; left: 50%; transform: translate(-50%, -50%);
   font-size: 34px; font-weight: 800; letter-spacing: 3px; color: #ffd76a;

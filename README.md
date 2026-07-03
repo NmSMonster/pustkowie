@@ -52,15 +52,27 @@ call the regulators on whoever's winning.
 - `src/input.js` / `src/audio.js` — trackpad-first controls; WebAudio SFX driven by sim events
 - `src/settings.js` — persistent settings (volumes, graphics quality, last faction) in localStorage
 
-Rendering: full cinematic pipeline — bloom + tilt-shift depth of field +
-filmic color grade (S-curve, teal/orange split-toning, vignette) on an MSAA
-render target; a living **day-night cycle** (golden hour fades into deep
-night with glowing lab windows, warm street lamps, fireflies and a starfield);
-drifting clouds that cast moving shadows; wind-swaying grass and trees via
-shader displacement; shader sky dome, sculpted backdrop hills, instanced
-grass and rocks, PMREM image-based lighting, bump-mapped terrain, trampled
-paths, contact shadows, jagged lightning and fireball-and-smoke explosions.
-Three quality tiers auto-scale for weak GPUs (or force in ⚙ settings).
+Rendering — the full AAA-style pipeline:
+**post**: GTAO ambient occlusion (FX-aware), selection outlines, bloom,
+tilt-shift depth of field, screen-space god rays, camera motion blur
+(afterimage), filmic grade with S-curve, teal/orange split-toning,
+chromatic aberration, animated film grain and vignette, lens flare with
+ghosting — all on an MSAA HDR target.
+**lighting**: sunset HDRI image-based lighting, camera-following tight
+shadow frustum for crisp shadows, pooled dynamic point lights on
+explosions and zaps, a living day-night cycle (lab windows, street lamps,
+blinking antenna beacons, fireflies, starfield).
+**world**: animated water ponds in the backdrop hills, service roads with
+lane markings, solar panels and antenna masts at every base, drifting
+clouds with moving ground shadows, weather fronts (rain + closing fog),
+morning mist after dawn, wind-swaying grass and foliage, bump-mapped
+terrain, trampled paths, instanced rocks.
+**gameplay feel**: batched particle pools (sparks/dust in 2 draw calls),
+dust under running feet, scorch decals that linger after explosions,
+double-layer tracers, ragdoll-lite deaths (hop, spin, topple), screen
+shake, construction scaffolding, milestone kill-cam with letterbox bars,
+distance-based animation LOD. Three quality tiers auto-scale for weak
+GPUs (or force in ⚙ settings).
 
 All 3D models, sound effects and music are real, downloaded, CC-licensed
 assets — see [ATTRIBUTION.md](ATTRIBUTION.md).

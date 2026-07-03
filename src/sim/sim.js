@@ -1,6 +1,6 @@
 // Core simulation. Pure data + logic: no rendering, no DOM, no three.js.
 // Fixed-timestep tick; renderer/UI/audio consume `sim.events` each frame.
-import { FACTIONS, START, UNITS, BUILDINGS, MILESTONES, ABILITIES, TRUST, MAP, RESEARCHER_ASSIST, WORLD_EVENTS, PACT, makeNodes, BASES } from './data.js';
+import { FACTIONS, START, UNITS, BUILDINGS, MILESTONES, ABILITIES, TRUST, MAP, RESEARCHER_ASSIST, WORLD_EVENTS, PACT, SIGHT, DIFFICULTY, makeNodes, BASES } from './data.js';
 
 export function mulberry32(a) {
   return function () {
@@ -14,7 +14,7 @@ export function mulberry32(a) {
 let NEXT_ID = 1;
 
 export class Sim {
-  constructor(playerFactionId = 'anthropic', seed = 1337) {
+  constructor(playerFactionId = 'anthropic', seed = 1337, opts = {}) {
     this.rand = mulberry32(seed);
     this.t = 0;
     this.over = false;
@@ -22,7 +22,9 @@ export class Sim {
     this.events = [];
     this.units = [];
     this.buildings = [];
-    this.nodes = makeNodes().map((n, i) => ({ id: 'node' + i, ...n, max: n.amount }));
+    this.mapVariant = opts.mapVariant || 'classic';
+    this.difficulty = DIFFICULTY[opts.difficulty] || DIFFICULTY.normal;
+    this.nodes = makeNodes(this.mapVariant).map((n, i) => ({ id: 'node' + i, ...n, max: n.amount }));
     this.factions = {};
     this.playerFaction = playerFactionId;
     // world events
@@ -33,6 +35,18 @@ export class Sim {
     this.pacts = {};           // 'a|b' -> { a, b, t }
     this.grudges = {};         // 'a|b' -> cooldown before this pair can re-ally
     this.pendingOffer = null;  // { from, t } — offer awaiting the player
+    // fog of war (player perspective; AI plays with open eyes, like it's 1999)
+    this.fogN = 34;
+    this.fogCell = MAP.size / this.fogN;
+    this.visible = new Uint8Array(this.fogN * this.fogN);
+    this.explored = new Uint8Array(this.fogN * this.fogN);
+    this.fogT = 0;
+    this.intel = null;         // { on: fid, t } — mole inside a rival lab
+    // match history + last-seconds replay ring
+    this.history = [];         // every 5s: { t, s: {fid: score}, a: {fid: army} }
+    this._histT = 0;
+    this.recap = [];           // ring of snapshots for the defeat replay
+    this._recapT = 0;
 
     const ids = Object.keys(FACTIONS);
     // Player always starts bottom-left; rivals fill other corners.
@@ -212,6 +226,13 @@ export class Sim {
     return true;
   }
 
+  resolveFaction(targetId) {
+    // abilities may target a faction id directly or any of its entities
+    if (this.factions[targetId]) return this.factions[targetId];
+    const ent = targetId ? this.getEntity(targetId) : null;
+    return ent?.faction ? this.fac(ent.faction) : null;
+  }
+
   cmdAbility(fid, key, targetId = null) {
     const f = this.fac(fid);
     const ab = ABILITIES[key];
@@ -232,7 +253,7 @@ export class Sim {
       f.stats.poached++;
       this.emit({ type: 'poached', fid, victim: victim.id, x: target.x, z: target.z });
     } else if (key === 'probe') {
-      const victim = this.fac(targetId);
+      const victim = this.resolveFaction(targetId);
       if (!victim || !victim.alive || victim.id === fid) return false;
       this.pay(f, ab.cost);
       f.trust = Math.max(0, f.trust - ab.trustCost);
@@ -246,10 +267,66 @@ export class Sim {
       this.pay(f, ab.cost);
       f.trust = Math.min(100, f.trust + 12);
       this.emit({ type: 'pr', fid });
+    } else if (key === 'scrape') {
+      f.trust = Math.max(0, f.trust - ab.trustCost);
+      f.data += 150;
+      this.emit({ type: 'scrape', fid });
+    } else if (key === 'license') {
+      this.pay(f, ab.cost);
+      f.data += 150;
+      f.trust = Math.min(100, f.trust + 3);
+      this.emit({ type: 'license', fid });
+    } else if (key === 'infiltrate') {
+      const victim = this.resolveFaction(targetId);
+      if (!victim || !victim.alive || victim.id === fid) return false;
+      this.pay(f, ab.cost);
+      if (fid === this.playerFaction) this.intel = { on: victim.id, t: 30 };
+      this.emit({ type: 'infiltrated', fid, victim: victim.id });
     } else return false;
 
     f.cooldowns[key] = ab.cooldown;
     return true;
+  }
+
+  // ---------- fog of war ----------
+  fogIdx(x, z) {
+    const i = Math.max(0, Math.min(this.fogN - 1, Math.floor((x + MAP.half) / this.fogCell)));
+    const j = Math.max(0, Math.min(this.fogN - 1, Math.floor((z + MAP.half) / this.fogCell)));
+    return j * this.fogN + i;
+  }
+  visAt(x, z) { return this.visible[this.fogIdx(x, z)] > 0; }
+  expAt(x, z) { return this.explored[this.fogIdx(x, z)] > 0; }
+  stampSight(x, z, r) {
+    const n = this.fogN, c = this.fogCell;
+    const ci = (x + MAP.half) / c, cj = (z + MAP.half) / c, cr = r / c;
+    const i0 = Math.max(0, Math.floor(ci - cr)), i1 = Math.min(n - 1, Math.ceil(ci + cr));
+    const j0 = Math.max(0, Math.floor(cj - cr)), j1 = Math.min(n - 1, Math.ceil(cj + cr));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const dx = i + 0.5 - ci, dz = j + 0.5 - cj;
+      if (dx * dx + dz * dz <= cr * cr) {
+        const idx = j * n + i;
+        this.visible[idx] = 1; this.explored[idx] = 1;
+      }
+    }
+  }
+  recomputeFog() {
+    this.visible.fill(0);
+    const pf = this.playerFaction;
+    for (const u of this.units) {
+      if (!u.dead && u.faction === pf) this.stampSight(u.x, u.z, SIGHT[u.kind] || 11);
+    }
+    for (const b of this.buildings) {
+      if (!b.dead && b.faction === pf && b.done) this.stampSight(b.x, b.z, SIGHT[b.kind] || 13);
+    }
+    // an active mole lights up the target's base
+    if (this.intel) {
+      const tf = this.fac(this.intel.on);
+      if (tf?.alive) this.stampSight(tf.base.x, tf.base.z, 22);
+    }
+    // mark discovered enemy buildings (they stay on the map once seen)
+    for (const b of this.buildings) {
+      if (!b.dead && b.faction !== pf && !b.seen && this.visAt(b.x, b.z)) b.seen = true;
+    }
   }
 
   raceLeader(excludeFid = null) {
@@ -280,6 +357,7 @@ export class Sim {
     if (betrayal && byFid) {
       const t = this.fac(byFid);
       t.trust = Math.max(0, t.trust - PACT.betrayTrustCost);
+      t.stats.betrayals = (t.stats.betrayals || 0) + 1;
     }
     this.emit({ type: 'pactBroken', a, b, by: byFid, betrayal });
   }
@@ -353,6 +431,36 @@ export class Sim {
       if (this.pendingOffer.t <= 0) { this.emit({ type: 'pactOfferExpired', from: this.pendingOffer.from }); this.pendingOffer = null; }
     }
 
+    // fog of war refresh
+    this.fogT -= dt;
+    if (this.fogT <= 0) { this.fogT = 0.25; this.recomputeFog(); }
+    if (this.intel) {
+      this.intel.t -= dt;
+      if (this.intel.t <= 0) { this.emit({ type: 'intelEnd', on: this.intel.on }); this.intel = null; }
+    }
+    // score history for the end-of-match chart
+    this._histT -= dt;
+    if (this._histT <= 0) {
+      this._histT = 5;
+      const s2 = {}, a2 = {};
+      for (const fid in this.factions) {
+        const f2 = this.factions[fid];
+        s2[fid] = f2.alive ? +(f2.milestone + f2.researchProgress).toFixed(2) : null;
+        a2[fid] = f2.alive ? this.units.filter(u => !u.dead && u.faction === fid && u.kind !== 'researcher').length : 0;
+      }
+      this.history.push({ t: Math.round(this.t), s: s2, a: a2 });
+    }
+    // replay ring buffer (last ~12s)
+    this._recapT -= dt;
+    if (this._recapT <= 0) {
+      this._recapT = 0.4;
+      const frame = { t: this.t, u: [], b: [] };
+      for (const u of this.units) if (!u.dead) frame.u.push([u.faction, u.kind === 'researcher' ? 0 : 1, Math.round(u.x), Math.round(u.z)]);
+      for (const b of this.buildings) if (!b.dead) frame.b.push([b.faction, b.kind === 'hq' ? 1 : 0, Math.round(b.x), Math.round(b.z), Math.round(100 * b.hp / b.maxHp)]);
+      this.recap.push(frame);
+      if (this.recap.length > 30) this.recap.shift();
+    }
+
     for (const fid in this.factions) this.tickFaction(this.fac(fid), dt);
     for (const b of this.buildings) if (!b.dead) this.tickBuilding(b, dt);
     for (const u of this.units) if (!u.dead) this.tickUnit(u, dt);
@@ -373,6 +481,7 @@ export class Sim {
       const inc = BUILDINGS[b.kind].income;
       if (inc) {
         let cm = (inc.compute || 0) * mult * (f.def.computeMult || 1);
+        if (!f.isPlayer) cm *= this.difficulty.income;
         if (f.probedT > 0) cm *= 0.5;
         if (this.activeEvent?.key === 'chipban') cm *= 0.6;
         f.compute += cm * dt;
@@ -539,7 +648,13 @@ export class Sim {
             const f = this.fac(u.faction);
             let dmg = def.dmg * (f.def.agentDamage && u.kind !== 'researcher' ? f.def.agentDamage : 1);
             if (f.milestone >= 3) dmg *= 1.25;
-            this.emit({ type: u.kind === 'sentinel' ? 'shot' : 'punch', from: { x: u.x, z: u.z }, to: { x: t.x, z: t.z }, fid: u.faction });
+            if (def.bonusVs && t.kind === def.bonusVs) dmg *= def.bonusMult;
+            if (def.slows && t.slowT !== undefined) { t.slowT = Math.max(t.slowT, 1.2); t.slowAmt = 0.35; }
+            this.emit({
+              type: u.kind === 'sentinel' || u.kind === 'interceptor' ? 'shot' : 'punch',
+              kind: u.kind === 'interceptor' ? 'emp' : 'ballistic',
+              from: { x: u.x, z: u.z }, to: { x: t.x, z: t.z }, fid: u.faction,
+            });
             if (t.maxHp && t.progress !== undefined) this.damageBuilding(t, dmg, u.faction);
             else this.damageUnit(t, dmg, u.faction);
           }
@@ -664,6 +779,7 @@ export class Sim {
     const f = this.fac(b.faction);
     this.noticeAttack(f, b.x, b.z, byFid);
     // final training run interrupted by damage to HQ
+    if (b.kind === 'hq' && b.hp / b.maxHp < 0.25) f.stats.hqLow = true;
     if (b.kind === 'hq' && f.researching && f.milestone === 4) {
       f.pausedT = 4;
       f.researchProgress = Math.max(0, f.researchProgress - dmg / 900);

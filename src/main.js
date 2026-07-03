@@ -6,6 +6,7 @@ import { World } from './render/world.js';
 import { initInput } from './input.js';
 import { initHud, showMenu } from './ui/hud.js';
 import { initAudio } from './audio.js';
+import { settings } from './settings.js';
 
 const params = new URLSearchParams(location.search);
 const canvas = document.getElementById('gl');
@@ -17,7 +18,7 @@ const state = {
 window.__game = state; // debug/testing hook
 
 async function startGame(factionId) {
-  state.sim = new Sim(factionId, Date.now() % 100000);
+  state.sim = new Sim(factionId, Date.now() % 100000, { difficulty: settings.difficulty, mapVariant: settings.map });
   if (params.get('spectate')) state.sim.factions[factionId].isPlayer = false;
   state.ais = makeAIs(state.sim);
   state.world = new World(state.sim, canvas);

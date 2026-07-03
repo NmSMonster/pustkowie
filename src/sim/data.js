@@ -59,6 +59,18 @@ export const UNITS = {
     name: 'Sentinel', hp: 150, speed: 5.0, cost: { compute: 170, data: 60 }, buildTime: 15,
     radius: 0.6, dmg: 11, cooldown: 0.75, range: 9.5, aggro: 12, pop: 1, needsMilestone: 2,
   },
+  interceptor: {
+    name: 'Interceptor', hp: 80, speed: 6.0, cost: { compute: 140, data: 50 }, buildTime: 13,
+    radius: 0.55, dmg: 9, cooldown: 0.9, range: 6.2, aggro: 12, pop: 1, needsMilestone: 1,
+    bonusVs: 'agent', bonusMult: 2.2, slows: true,
+  },
+};
+
+// Counter triangle: Agents crush Sentinels up close, Sentinels outrange
+// Interceptors, Interceptors EMP-burst Agents (bonus damage + slow).
+export const SIGHT = {
+  researcher: 11, agent: 12, sentinel: 14, interceptor: 13,
+  hq: 16, datacenter: 13, campus: 13, foundry: 13, lobby: 13, synth: 13, tower: 18,
 };
 
 export const BUILDINGS = {
@@ -128,6 +140,18 @@ export const ABILITIES = {
     name: 'PR Campaign', building: 'lobby', cost: { favor: 30 }, cooldown: 25,
     desc: 'Glossy launch video, friendly podcast circuit: +12 trust.',
   },
+  scrape: {
+    name: 'Web Scrape', building: 'hq', cost: {}, trustCost: 10, cooldown: 45,
+    desc: 'Hoover the open web, robots.txt be damned: +150 data, −10 trust.',
+  },
+  license: {
+    name: 'Licensed Data', building: 'hq', cost: { compute: 200 }, cooldown: 45,
+    desc: 'Pay publishers like a good citizen: +150 data, +3 trust.',
+  },
+  infiltrate: {
+    name: 'Infiltrate', building: 'lobby', cost: { favor: 50 }, cooldown: 60,
+    desc: 'Plant a mole in a rival lab: reveal their base and books for 30s.',
+  },
 };
 
 export const TRUST = {
@@ -153,20 +177,51 @@ export const WORLD_EVENTS = {
 // force is a betrayal the public does not forget.
 export const PACT = { duration: 100, income: 0.6, betrayTrustCost: 8, proposeCost: 30, offerTime: 25 };
 
-// Node layout: two safe nodes near each corner base + contested middle ring.
-export function makeNodes() {
+// Node layouts — three map scripts with different economic geography.
+export const MAP_VARIANTS = {
+  classic: 'Classic Crossfire',
+  scarce: 'Scarce Center',
+  ring: 'Data Ring',
+};
+
+export function makeNodes(variant = 'classic') {
   const n = [];
   const c = 46, m = 13;
   const corners = [[-c, -c], [c, -c], [-c, c], [c, c]];
-  for (const [x, z] of corners) {
-    n.push({ x: x + (x > 0 ? -m : m), z: z + (z > 0 ? -4 : 4), amount: 700 });
-    n.push({ x: x + (x > 0 ? -4 : 4), z: z + (z > 0 ? -m : m), amount: 700 });
+  if (variant === 'scarce') {
+    // starved corners, one rich contested heart
+    for (const [x, z] of corners) {
+      n.push({ x: x + (x > 0 ? -m : m), z: z + (z > 0 ? -4 : 4), amount: 500 });
+    }
+    n.push({ x: 0, z: 0, amount: 3400 },
+            { x: -9, z: 9, amount: 1700 }, { x: 9, z: -9, amount: 1700 });
+  } else if (variant === 'ring') {
+    // an even ring — every neighbor is a border dispute
+    for (const [x, z] of corners) {
+      n.push({ x: x + (x > 0 ? -m : m), z: z + (z > 0 ? -4 : 4), amount: 600 });
+    }
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
+      n.push({ x: Math.cos(a) * 28, z: Math.sin(a) * 28, amount: 1050 });
+    }
+  } else {
+    for (const [x, z] of corners) {
+      n.push({ x: x + (x > 0 ? -m : m), z: z + (z > 0 ? -4 : 4), amount: 700 });
+      n.push({ x: x + (x > 0 ? -4 : 4), z: z + (z > 0 ? -m : m), amount: 700 });
+    }
+    n.push({ x: 0, z: -20, amount: 1300 }, { x: 0, z: 20, amount: 1300 },
+            { x: -20, z: 0, amount: 1300 }, { x: 20, z: 0, amount: 1300 },
+            { x: 0, z: 0, amount: 2000 });
   }
-  n.push({ x: 0, z: -20, amount: 1300 }, { x: 0, z: 20, amount: 1300 },
-          { x: -20, z: 0, amount: 1300 }, { x: 20, z: 0, amount: 1300 },
-          { x: 0, z: 0, amount: 2000 });
   return n;
 }
+
+// AI difficulty knobs (applied to AI factions only)
+export const DIFFICULTY = {
+  easy:   { name: 'Easy',   income: 0.85, aggro: -0.18, raidDelay: 90 },
+  normal: { name: 'Normal', income: 1.0,  aggro: 0,     raidDelay: 0 },
+  hard:   { name: 'Hard',   income: 1.15, aggro: 0.15,  raidDelay: -60 },
+};
 
 export const BASES = [
   { x: -46, z: -46 }, { x: 46, z: -46 }, { x: -46, z: 46 }, { x: 46, z: 46 },

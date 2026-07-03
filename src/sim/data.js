@@ -218,9 +218,10 @@ export function makeNodes(variant = 'classic') {
 
 // AI difficulty knobs (applied to AI factions only)
 export const DIFFICULTY = {
-  easy:   { name: 'Easy',   income: 0.85, aggro: -0.18, raidDelay: 90 },
-  normal: { name: 'Normal', income: 1.0,  aggro: 0,     raidDelay: 0 },
-  hard:   { name: 'Hard',   income: 1.15, aggro: 0.15,  raidDelay: -60 },
+  easy:   { key: 'easy',   name: 'Easy',   income: 0.85, aggro: -0.18, raidDelay: 90 },
+  normal: { key: 'normal', name: 'Normal', income: 1.0,  aggro: 0,     raidDelay: 0 },
+  hard:   { key: 'hard',   name: 'Hard',   income: 1.15, aggro: 0.15,  raidDelay: -60 },
+  insane: { key: 'insane', name: 'Insane', income: 1.3,  aggro: 0.3,   raidDelay: -120 },
 };
 
 export const BASES = [

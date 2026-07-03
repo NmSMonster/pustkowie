@@ -10,6 +10,7 @@ const DEFAULTS = {
   map: 'classic',
   achievements: {},
   tutorialDone: false,
+  meta: null,      // lab career: xp, wins, faction mastery, chosen skins
 };
 
 function load() {

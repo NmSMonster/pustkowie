@@ -1322,6 +1322,7 @@ export class World {
     }
     this.updateEffects(dt);
     this.updateCinema(dt);
+    this.updateGlide(dt);
     this.updateCamera();
     this.autoQuality(dt);
   }
@@ -1588,6 +1589,27 @@ export class World {
     }
   }
 
+  // smooth camera jump to a world position (clickable feed / alert cycling)
+  focusOn(x, z, dist = null) {
+    if (this.cinema) this.endCinema();
+    this.glide = {
+      fromF: this.camFocus.clone(), toF: new THREE.Vector3(x, 0, z),
+      fromD: this.camDist, toD: dist != null ? dist : Math.min(this.camDist, 34),
+      t: 0, dur: 0.5,
+    };
+    this.ping(x, z, 0xffe08a);
+  }
+
+  updateGlide(dt) {
+    const g = this.glide;
+    if (!g) return;
+    g.t += dt;
+    const k = THREE.MathUtils.smoothstep(g.t, 0, g.dur);
+    this.camFocus.lerpVectors(g.fromF, g.toF, k);
+    this.camDist = THREE.MathUtils.lerp(g.fromD, g.toD, k);
+    if (g.t >= g.dur) this.glide = null;
+  }
+
   // ---------------- camera ----------------
   startCinema(x, z, dur = 3.4) {
     if (this.cinema) return;
@@ -1642,7 +1664,7 @@ export class World {
     let sx = 0, sy = 0, sz = 0;
     if (this.shake.t > 0) {
       this.shake.t -= 1 / 60;
-      const k = this.shake.amp * (this.shake.t / 0.45);
+      const k = this.shake.amp * (this.shake.t / 0.45) * (this.reduceMotion ? 0.25 : 1);
       sx = (Math.random() - 0.5) * k; sy = (Math.random() - 0.5) * k * 0.7; sz = (Math.random() - 0.5) * k;
       if (this.shake.t <= 0) this.shake.amp = 0;
     }
@@ -1834,6 +1856,8 @@ export class World {
     this.scorches = [];
     this._scorchIdx = 0;
     this.shake = { t: 0, amp: 0 };
+    this.glide = null;           // smooth camera jump-to (clickable feed/alerts)
+    this.reduceMotion = false;   // accessibility: damp shake + heavy particles
 
     // pooled point lights for explosions and zaps
     this.plPool = Array.from({ length: 4 }, () => {

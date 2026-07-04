@@ -7,8 +7,9 @@ body {
 }
 #app { position: fixed; inset: 0; }
 #gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+:root { --ui-scale: 1; }
 #hud { position: absolute; inset: 0; pointer-events: none; }
-#hud > * { pointer-events: auto; }
+#hud > * { pointer-events: auto; zoom: var(--ui-scale, 1); }
 body.placing #gl { cursor: copy; }
 body.targeting #gl { cursor: crosshair; }
 
@@ -52,6 +53,19 @@ body.targeting #gl { cursor: crosshair; }
   background: transparent; color: #cfd8ea; cursor: pointer; font-size: 13px;
 }
 #gearbtn:hover { background: rgba(120,150,210,0.25); }
+
+/* game speed control */
+#speedctl { display: flex; gap: 3px; }
+#speedctl .spd {
+  min-width: 26px; height: 22px; padding: 0 5px; border-radius: 6px;
+  border: 1px solid rgba(150,170,210,0.28); background: transparent;
+  color: #9fb0cc; font-size: 11px; font-weight: 700; cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+#speedctl .spd:hover { background: rgba(120,150,210,0.2); color: #e8ecf2; }
+#speedctl .spd.on {
+  background: rgba(110,231,135,0.2); border-color: rgba(110,231,135,0.55); color: #9ff0b3;
+}
 
 /* active world event chip */
 #eventchip {
@@ -182,6 +196,20 @@ body.targeting #gl { cursor: crosshair; }
   transition: opacity 1.5s;
 }
 .feeditem.fade { opacity: 0; }
+.feeditem.jump {
+  pointer-events: auto; cursor: pointer;
+  background: rgba(14, 20, 34, 0.85);
+}
+.feeditem.jump::after {
+  content: ' ➤'; opacity: 0.55; font-size: 11px;
+}
+.feeditem.jump:hover { background: rgba(30, 42, 66, 0.95); filter: brightness(1.15); }
+
+/* accessibility group header in settings */
+.setgrp {
+  margin: 14px 0 4px; font-size: 11px; letter-spacing: 1.5px;
+  color: #7f8db0; border-top: 1px solid rgba(120,150,200,0.18); padding-top: 10px;
+}
 
 /* ---------- selection panel ---------- */
 #selpanel {

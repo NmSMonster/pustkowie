@@ -44,6 +44,15 @@ export const FACTIONS = {
   },
 };
 
+// Colorblind-safe faction palette (Okabe-Ito inspired, distinct under
+// deuteranopia/protanopia). Applied in main.js when settings.colorblind is on.
+export const COLORBLIND = {
+  openai:    0x009e73, // bluish green
+  anthropic: 0xe69f00, // orange
+  deepmind:  0x56b4e9, // sky blue
+  xai:       0xcc79a7, // reddish purple
+};
+
 export const START = { compute: 320, data: 160, favor: 0, trust: 60 };
 
 export const UNITS = {

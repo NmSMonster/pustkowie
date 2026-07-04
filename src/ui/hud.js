@@ -2,6 +2,7 @@
 // event feed, help, menu and end screens. Reads sim; issues commands.
 import { FACTIONS, UNITS, BUILDINGS, MILESTONES, ABILITIES, MAP, TRUST, WORLD_EVENTS, PACT, MAP_VARIANTS, DIFFICULTY } from '../sim/data.js';
 import { settings, saveSettings } from '../settings.js';
+import { applyAccessibility } from '../access.js';
 import { meta, levelProgress, levelFromXp, TITLES, SKINS, UNLOCKS, MASTERY_WINS, masteryStars, skinUnlocked, chosenSkin, grantMatchXp } from '../meta.js';
 
 const ICONS = { compute: '⚡', data: '◈', favor: '🏛', trust: '☺' };
@@ -32,6 +33,9 @@ export function initHud(state) {
       <div class="res" id="res-favor"><span class="ic">${ICONS.favor}</span><b>0</b></div>
       <div class="res trust"><span class="ic">${ICONS.trust}</span><div id="trustbar"><div></div></div></div>
       <div id="clock">0:00</div>
+      <div id="speedctl" title="Game speed ( [ and ] )">
+        ${[0.5, 1, 2, 3].map(s => `<button class="spd" data-spd="${s}">${s}×</button>`).join('')}
+      </div>
       <button id="helpbtn" title="How to play (H)">?</button>
       <button id="gearbtn" title="Settings">⚙</button>
     </div>
@@ -60,6 +64,23 @@ export function initHud(state) {
   el('fbadge').innerHTML = `<span class="dot" style="background:${f0.css}"></span>${f0.name}`;
   el('helpbtn').onclick = () => api.toggleHelp();
   el('gearbtn').onclick = () => toggleSettings();
+
+  // ---------- game speed ----------
+  const SPEEDS = [0.5, 1, 2, 3];
+  function setSpeed(s) {
+    state.speed = s;
+    saveSettings({ gameSpeed: s });
+    for (const b of el('speedctl').querySelectorAll('.spd'))
+      b.classList.toggle('on', +b.dataset.spd === s);
+  }
+  function cycleSpeed(dir) {
+    const i = Math.max(0, SPEEDS.indexOf(state.speed));
+    setSpeed(SPEEDS[Math.min(SPEEDS.length - 1, Math.max(0, i + dir))]);
+  }
+  el('speedctl').querySelectorAll('.spd').forEach(b => {
+    b.onclick = () => { setSpeed(+b.dataset.spd); state.audio?.play('click', 0.4); };
+  });
+  setSpeed(state.speed || 1);
 
   // race rows
   const raceRows = {};
@@ -181,11 +202,16 @@ export function initHud(state) {
   }
 
   // ---------- feed & alerts ----------
-  function post(msg, color = '#cfd8ea') {
+  function post(msg, color = '#cfd8ea', loc = null) {
     const d = document.createElement('div');
     d.className = 'feeditem';
     d.style.borderLeftColor = color;
     d.textContent = msg;
+    if (loc && Number.isFinite(loc.x) && Number.isFinite(loc.z)) {
+      d.classList.add('jump');
+      d.title = 'Click to jump there';
+      d.onclick = () => { state.world?.focusOn(loc.x, loc.z); state.audio?.play('click', 0.4); };
+    }
     feed.prepend(d);
     while (feed.children.length > 6) feed.lastChild.remove();
     setTimeout(() => d.classList.add('fade'), 7000);
@@ -217,13 +243,22 @@ export function initHud(state) {
           post(`${fd.short} is training a superintelligence!`, fd.css);
           break;
         case 'underattack':
-          if (mine) { bigAlert('⚔ Your lab is under attack!', '#ff6a5a'); }
+          if (mine) {
+            bigAlert('⚔ Your lab is under attack!', '#ff6a5a');
+            const loc = { x: e.x ?? me().base.x, z: e.z ?? me().base.z };
+            api.lastAlertLoc = loc;
+            post('⚔ Your lab is under attack', '#ff6a5a', loc);
+          }
           break;
         case 'raidLaunched':
-          if (e.victim === sim().playerFaction) post(`Hostile agents heading your way`, '#ff6a5a');
+          if (e.victim === sim().playerFaction) {
+            api.lastAlertLoc = { x: me().base.x, z: me().base.z };
+            post(`Hostile agents heading your way`, '#ff6a5a', me().base);
+          }
           break;
         case 'poached':
-          post(`${fd.short} poached a researcher from ${FACTIONS[e.victim].short}`, fd.css);
+          post(`${fd.short} poached a researcher from ${FACTIONS[e.victim].short}`, fd.css,
+            Number.isFinite(e.x) ? { x: e.x, z: e.z } : null);
           if (e.victim === sim().playerFaction) bigAlert('A researcher was poached!', '#d48aff');
           break;
         case 'probed':
@@ -531,12 +566,23 @@ export function initHud(state) {
           <select id="set-quality">
             ${['auto', 'high', 'low'].map(q => `<option value="${q}" ${settings.quality === q ? 'selected' : ''}>${q}</option>`).join('')}
           </select></div>
-        <p class="stats">Saved automatically. Quality changes apply to new matches instantly; in-match it adjusts on the fly.</p>
+        <h4 class="setgrp">ACCESSIBILITY</h4>
+        <div class="setrow"><label>Colorblind-safe colors</label><input type="checkbox" id="set-cb" ${settings.colorblind ? 'checked' : ''}></div>
+        <div class="setrow"><label>Reduce motion &amp; effects</label><input type="checkbox" id="set-rm" ${settings.reduceMotion ? 'checked' : ''}></div>
+        <div class="setrow"><label>HUD scale <span id="uisv">${Math.round((settings.uiScale || 1) * 100)}%</span></label><input type="range" id="set-ui" min="0.8" max="1.4" step="0.05" value="${settings.uiScale || 1}"></div>
+        <p class="stats">Saved automatically. Colorblind palette applies to new matches; motion &amp; HUD scale apply instantly.</p>
         <button onclick="document.getElementById('settings').style.display='none'">CLOSE</button>
       </div>`;
     el('set-master').oninput = (e) => saveSettings({ master: +e.target.value });
     el('set-music').oninput = (e) => saveSettings({ music: +e.target.value });
     el('set-quality').onchange = (e) => saveSettings({ quality: e.target.value });
+    el('set-cb').onchange = (e) => { saveSettings({ colorblind: e.target.checked }); applyAccessibility(); };
+    el('set-rm').onchange = (e) => { saveSettings({ reduceMotion: e.target.checked }); applyAccessibility(); };
+    el('set-ui').oninput = (e) => {
+      saveSettings({ uiScale: +e.target.value });
+      el('uisv').textContent = Math.round(+e.target.value * 100) + '%';
+      applyAccessibility();
+    };
   }
 
   // ---------- per-frame ----------
@@ -722,7 +768,7 @@ export function initHud(state) {
     }
   }
 
-  const api = { update, applyEvents, refreshSelection, toggleHelp, setPaused, post, bigAlert };
+  const api = { update, applyEvents, refreshSelection, toggleHelp, setPaused, post, bigAlert, setSpeed, cycleSpeed, lastAlertLoc: null };
   state.hud = api;
   post('Welcome. Scale responsibly — or don\'t.', f0.css);
   return api;

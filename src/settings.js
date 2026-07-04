@@ -11,6 +11,10 @@ const DEFAULTS = {
   achievements: {},
   tutorialDone: false,
   meta: null,      // lab career: xp, wins, faction mastery, chosen skins
+  reduceMotion: false, // accessibility: damp screen shake & heavy particles
+  uiScale: 1,          // HUD scale 0.8..1.4
+  colorblind: false,   // colorblind-safe faction palette
+  gameSpeed: 1,        // preferred default game speed
 };
 
 function load() {

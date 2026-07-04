@@ -49,6 +49,13 @@ call the regulators on whoever's winning.
 - **Two-finger scroll** — pan · **pinch** — zoom · **Q/E** — rotate
 - **Click / drag** — select · **two-finger tap** (right-click) — contextual order
 - **1 / 2** — select army / researchers · **F** — jump to base · **H** — in-game guide · **P** — pause
+- **[ / ]** — game speed (0.5×–3×, also in the top bar) · **Space** — jump to the latest alert
+- **Click an event in the feed** — snap the camera to where it happened
+
+## Accessibility & comfort
+
+Settings (⚙) include a **colorblind-safe faction palette**, **reduce motion & effects**
+(damps screen shake and heavy particles), and an **HUD scale** slider — all saved locally.
 
 ## Architecture
 

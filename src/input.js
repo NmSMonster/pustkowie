@@ -147,6 +147,7 @@ export function initInput(state, canvas) {
     e.preventDefault();
     const w = world();
     if (!w) return;
+    w.glide = null; // user took manual camera control
     if (e.ctrlKey) {
       // pinch gesture (and ctrl+wheel)
       w.camDist *= Math.max(0.72, Math.min(1.38, 1 + e.deltaY * 0.012));
@@ -176,8 +177,16 @@ export function initInput(state, canvas) {
       case 'KeyH': state.hud?.toggleHelp(); break;
       case 'KeyP': state.paused = !state.paused; state.hud?.setPaused(state.paused); break;
       case 'KeyF':
-        if (w) { const b = sim().fac(sim().playerFaction).base; w.camFocus.set(b.x, 0, b.z); }
+        if (w) { const b = sim().fac(sim().playerFaction).base; w.glide = null; w.camFocus.set(b.x, 0, b.z); }
         break;
+      case 'BracketLeft': state.hud?.cycleSpeed?.(-1); break;
+      case 'BracketRight': state.hud?.cycleSpeed?.(1); break;
+      case 'Space': {
+        e.preventDefault();
+        const loc = state.hud?.lastAlertLoc;
+        if (loc && w) w.focusOn(loc.x, loc.z);
+        break;
+      }
     }
     // control groups: Ctrl+1..9 assigns, 1..9 recalls (1/2 fall back to
     // army/researchers when the group is empty)
@@ -242,6 +251,7 @@ export function initInput(state, canvas) {
     if (k.has('KeyA') || k.has('ArrowLeft')) mx -= 1;
     if (k.has('KeyD') || k.has('ArrowRight')) mx += 1;
     if (mx || mz) {
+      w.glide = null;
       w.camFocus.x += (mx * cos + mz * sin) * pan;
       w.camFocus.z += (-mx * sin + mz * cos) * pan;
     }

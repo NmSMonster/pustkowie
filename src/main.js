@@ -9,6 +9,9 @@ import { initAudio } from './audio.js';
 import { settings } from './settings.js';
 import { chosenSkin, SKINS, levelFromXp, meta } from './meta.js';
 import { FACTIONS } from './sim/data.js';
+import { applyAccessibility } from './access.js';
+
+applyAccessibility(); // colorblind palette + UI scale at boot
 
 const params = new URLSearchParams(location.search);
 const canvas = document.getElementById('gl');
@@ -20,9 +23,12 @@ const state = {
 window.__game = state; // debug/testing hook
 
 async function startGame(factionId) {
+  // keep faction palette current (colorblind toggle, UI scale)
+  applyAccessibility();
   // meta: apply the player's chosen (and unlocked) faction skin for this match
+  // (skipped in colorblind mode so accessible colors are preserved)
   const skin = SKINS[chosenSkin(factionId)];
-  if (skin?.colors?.[factionId]) {
+  if (!settings.colorblind && skin?.colors?.[factionId]) {
     FACTIONS[factionId].color = skin.colors[factionId];
     FACTIONS[factionId].css = '#' + skin.colors[factionId].toString(16).padStart(6, '0');
   }
@@ -34,11 +40,12 @@ async function startGame(factionId) {
   if (params.get('spectate')) state.sim.factions[factionId].isPlayer = false;
   state.ais = makeAIs(state.sim);
   state.world = new World(state.sim, canvas);
+  state.world.reduceMotion = !!settings.reduceMotion;
   initInput(state, canvas);
   initHud(state);
   state.audio = await initAudio();
   state.running = true;
-  state.speed = parseFloat(params.get('speed') || '1');
+  state.speed = parseFloat(params.get('speed') || settings.gameSpeed || '1');
 }
 
 let last = performance.now();
